@@ -1,0 +1,15 @@
+# 一次性验收服务镜像：Playwright 官方镜像已内置与 npm 包同版本的 Chromium
+FROM mcr.microsoft.com/playwright:v1.63.0-noble
+
+USER root
+RUN mkdir /app
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN chown -R pwuser:pwuser /app
+USER pwuser
+
+# BASE_URL 指向 compose 中的 web 服务；设置后 playwright.config.ts 不再自建服务器
+ENV BASE_URL=http://web:80
+CMD ["npx", "playwright", "test"]

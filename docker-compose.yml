@@ -1,0 +1,67 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: kiln
+      POSTGRES_PASSWORD: kiln
+      POSTGRES_DB: kiln
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kiln -d kiln"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://kiln:kiln@db:5432/kiln
+    ports:
+      # API_PORT 可覆盖，默认 8000
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build: ./frontend
+    ports:
+      # WEB_PORT 可覆盖，默认 8080
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost/ >/dev/null || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # 一次性验收服务：对真实 web+api+db 运行 Playwright E2E，结束后退出。
+  # 运行：docker compose run --build --rm verify
+  verify:
+    profiles: ["verify"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.verify
+    environment:
+      BASE_URL: http://web:80
+      CI: "1"
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
