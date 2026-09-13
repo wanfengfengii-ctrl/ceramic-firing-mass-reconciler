@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { EntryForm, ReckoningPanel } from "./components/EntryForm";
 import { DetailView } from "./components/DetailView";
 import { ImportPreviewPanel } from "./components/ImportPreview";
+import { ScaleCheckWorkbench } from "./components/ScaleCheckWorkbench";
 import {
   KINDS,
   type FocusTarget,
@@ -71,6 +72,7 @@ async function readFileTextUtf8(file: File): Promise<string> {
 }
 
 export default function App() {
+  const [tab, setTab] = useState<"batch" | "scale">("batch");
   const [rows, setRows] = useState<Rows>(emptyRows);
   const [batchNo, setBatchNo] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -234,6 +236,33 @@ export default function App() {
         </p>
       </header>
 
+      <nav className="tabs" aria-label="工作台切换">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "batch"}
+          className={tab === "batch" ? "tab tab-active" : "tab"}
+          data-testid="tab-batch"
+          onClick={() => setTab("batch")}
+        >
+          批次核算
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "scale"}
+          className={tab === "scale" ? "tab tab-active" : "tab"}
+          data-testid="tab-scale"
+          onClick={() => setTab("scale")}
+        >
+          日常秤检
+        </button>
+      </nav>
+
+      {tab === "scale" && <ScaleCheckWorkbench />}
+
+      {tab === "batch" && (
+        <>
       <div className="batch-no">
         <label htmlFor="batch-no">批次号</label>
         <input
@@ -361,6 +390,8 @@ export default function App() {
           </table>
         )}
       </section>
+        </>
+      )}
     </main>
   );
 }

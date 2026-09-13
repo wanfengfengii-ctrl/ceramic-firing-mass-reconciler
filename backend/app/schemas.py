@@ -170,3 +170,62 @@ def q3(value: Decimal, *, signed: bool = False) -> str:
     if signed and value >= 0:
         text = "+" + text
     return text
+
+
+# ---------------------------------------------------------------------------
+# 日常秤检台账（独立资源：与批次表互不引用，不参与/不阻断批次核算）
+# ---------------------------------------------------------------------------
+
+
+class ScalePointIn(BaseModel):
+    """一个标准砝码测点：标准重量与实测重量均为正的三位小数十进制文本。"""
+
+    # strict：JSON 数字不被接受；extra=forbid：测点对象只能含这两个字段
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    standard: str
+    measured: str
+
+
+class ScaleCheckIn(BaseModel):
+    """一次秤检：设备编号 + 检验日期 + 恰好三组测点。
+
+    语义校验（空编号、日期格式、重量正数/三位小数、三测点数量）集中在
+    scale/service 层完成，以便错误信息能定位到具体测点。
+    """
+
+    model_config = ConfigDict(strict=True)
+
+    device_no: str = Field(min_length=1, max_length=64)
+    check_date: str
+    points: list[ScalePointIn]
+
+    @field_validator("device_no")
+    @classmethod
+    def _strip_device_no(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("设备编号不能为空")
+        return value
+
+    @field_validator("check_date")
+    @classmethod
+    def _strip_date(cls, value: str) -> str:
+        return value.strip()
+
+
+class ScalePointOut(BaseModel):
+    seq: int
+    standard: str
+    measured: str
+    deviation: str  # 实测 − 标准，带符号，固定三位小数
+
+
+class ScaleCheckOut(BaseModel):
+    id: int
+    device_no: str
+    check_date: str  # YYYY-MM-DD
+    points: list[ScalePointOut]
+    passed: bool
+    verdict: str  # “合格” / “不合格”
+    created_at: str

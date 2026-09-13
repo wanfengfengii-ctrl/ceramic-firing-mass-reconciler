@@ -706,8 +706,7 @@ test("文件含非法 UTF-8 字节：浏览器侧识别编码无效并整份拒�
   expect(after).toEqual(before);
 });
 
-test("第 2 行含超长重量的文件：页面指出该行重量非法，而非笼统重试", async ({ page }) => {
-  // 回归：约 1 MB 的超长重量曾让后端 500，页面只显示“请求失败/请重试”
+test("第 2 行含超长重量的文件：页面指出该行重量非法，而非笼统重试", async ({ page }) => {  // 回归：约 1 MB 的超长重量曾让后端 500，页面只显示“请求失败/请重试”
   const longWeight = "9".repeat(999_900);
   const csv = [
     "分区,重量,单份重量,份数",
@@ -734,3 +733,281 @@ test("第 2 行含超长重量的文件：页面指出该行重量非法，而�
   expect(after).toEqual(before);
 });
 
+
+// ---------------------------------------------------------------------------
+// 日常秤检工作台：即时偏差/结论、保存、刷新恢复、临界与单点超差、非法/重复不留痕
+// 秤检是独立资源：与批次接口互不引用、不阻断批次核算
+// ---------------------------------------------------------------------------
+
+const scaleStamp = Date.now();
+let scaleCounter = 0;
+const nextDeviceNo = () => `E2E-SC-${scaleStamp}-${scaleCounter++}`;
+
+async function gotoScale(page: Page) {
+  await page.goto("/");
+  await page.getByTestId("tab-scale").click();
+  await expect(page.getByTestId("scale-workbench")).toBeVisible();
+}
+
+async function fillScalePoint(page: Page, seq: number, standard: string, measured: string) {
+  await page.getByLabel(`第${seq}测点标准重量（克）`).fill(standard);
+  await page.getByLabel(`第${seq}测点实测重量（克）`).fill(measured);
+}
+
+async function scaleCount(page: Page): Promise<number> {
+  const resp = await page.request.get("/api/scale-checks");
+  const body = (await resp.json()) as unknown[];
+  return body.length;
+}
+
+test("秤检：三组带符号偏差即时显示，合格保存并展示本次结论，刷新后台账倒序恢复", async ({ page }) => {
+  const device = nextDeviceNo();
+  await gotoScale(page);
+  await page.getByTestId("scale-device").fill(device);
+  await page.getByTestId("scale-date").fill("2026-09-13");
+  await fillScalePoint(page, 1, "1000.000", "1000.100");
+  await fillScalePoint(page, 2, "500.000", "499.600");
+  await fillScalePoint(page, 3, "200.000", "200.300");
+
+  // 即时带符号偏差（十进制定点，无二进制浮点尾巴）
+  await expect(page.getByTestId("scale-deviation-0")).toHaveText("+0.100 g");
+  await expect(page.getByTestId("scale-deviation-1")).toHaveText("-0.400 g");
+  await expect(page.getByTestId("scale-deviation-2")).toHaveText("+0.300 g");
+  await expect(page.getByTestId("scale-preview-verdict")).toHaveText("即时判定：合格");
+
+  await page.getByTestId("scale-submit").click();
+
+  const saved = page.getByTestId("scale-saved");
+  await expect(saved).toBeVisible();
+  await expect(page.getByTestId("scale-saved-verdict")).toHaveText("合格");
+  await expect(saved).toContainText("+0.100");
+  await expect(saved).toContainText("-0.400");
+
+  // 台账出现该记录
+  const row = page.locator('[data-testid^="scale-row-"]').filter({ hasText: device }).first();
+  await expect(row).toBeVisible();
+  await expect(row).toContainText("2026-09-13");
+  await expect(row).toContainText("合格");
+
+  // 刷新工作台：通过同一资源查询契约恢复记录
+  await page.reload();
+  await page.getByTestId("tab-scale").click();
+  const restored = page.getByRole("row").filter({ hasText: device }).first();
+  await expect(restored).toBeVisible();
+  await expect(restored).toContainText("+0.100 / -0.400 / +0.300");
+  await expect(restored).toContainText("合格");
+
+  // 接口契约与页面一致
+  const list = await (await page.request.get("/api/scale-checks")).json() as Array<{
+    device_no: string;
+    check_date: string;
+    passed: boolean;
+    verdict: string;
+    points: Array<{ deviation: string }>;
+  }>;
+  const mine = list.find((r) => r.device_no === device);
+  expect(mine).toBeDefined();
+  expect(mine!.check_date).toBe("2026-09-13");
+  expect(mine!.passed).toBe(true);
+  expect(mine!.verdict).toBe("合格");
+  expect(mine!.points.map((p) => p.deviation)).toEqual(["+0.100", "-0.400", "+0.300"]);
+});
+
+test("秤检临界偏差：±0.500 g 合格，单点 +0.501/-0.501 g 不合格，前后端结论一致", async ({ page }) => {
+  const deviceEdge = nextDeviceNo();
+  await gotoScale(page);
+  await page.getByTestId("scale-device").fill(deviceEdge);
+  await page.getByTestId("scale-date").fill("2026-09-12");
+  // 三组都恰好 ±0.500 g：临界合格
+  await fillScalePoint(page, 1, "100.000", "100.500");
+  await fillScalePoint(page, 2, "100.000", "99.500");
+  await fillScalePoint(page, 3, "100.000", "100.000");
+  await expect(page.getByTestId("scale-preview-verdict")).toHaveText("即时判定：合格");
+  await page.getByTestId("scale-submit").click();
+  await expect(page.getByTestId("scale-saved-verdict")).toHaveText("合格");
+
+  // 接口裁决与预览一致
+  const edgeList = (await (await page.request.get("/api/scale-checks")).json()) as Array<{
+    device_no: string;
+    passed: boolean;
+  }>;
+  expect(edgeList.find((r) => r.device_no === deviceEdge)?.passed).toBe(true);
+
+  // 单点正向超差 +0.501
+  const deviceOver = nextDeviceNo();
+  await gotoScale(page);
+  await page.getByTestId("scale-device").fill(deviceOver);
+  await page.getByTestId("scale-date").fill("2026-09-12");
+  await fillScalePoint(page, 1, "100.000", "100.500");
+  await fillScalePoint(page, 2, "100.000", "99.500");
+  await fillScalePoint(page, 3, "100.000", "100.501");
+  await expect(page.getByTestId("scale-deviation-2")).toHaveText("+0.501 g");
+  await expect(page.getByTestId("scale-preview-verdict")).toHaveText("即时判定：不合格");
+  await page.getByTestId("scale-submit").click();
+  await expect(page.getByTestId("scale-saved-verdict")).toHaveText("不合格");
+
+  // 单点负向超差 -0.501（实测 99.499）直接打后端，结论同样不合格
+  const deviceUnder = nextDeviceNo();
+  const resp = await page.request.post("/api/scale-checks", {
+    data: {
+      device_no: deviceUnder,
+      check_date: "2026-09-12",
+      points: [
+        { standard: "100.000", measured: "100.000" },
+        { standard: "100.000", measured: "100.000" },
+        { standard: "100.000", measured: "99.499" },
+      ],
+    },
+  });
+  expect(resp.status()).toBe(201);
+  const body = await resp.json();
+  expect(body.passed).toBe(false);
+  expect(body.verdict).toBe("不合格");
+  expect(body.points[2].deviation).toBe("-0.501");
+
+  // 台账按日期倒序、同日按保存先后倒序：只比较本次三条记录的相对次序
+  const order = (await (await page.request.get("/api/scale-checks")).json()) as Array<{
+    device_no: string;
+    check_date: string;
+  }>;
+  const mine = order.filter((r) =>
+    [deviceUnder, deviceOver, deviceEdge].includes(r.device_no),
+  );
+  expect(mine.map((r) => r.device_no)).toEqual([deviceUnder, deviceOver, deviceEdge]);
+});
+
+test("秤检非法字段：逐测点反馈、保留输入、不发请求、台账数量不变", async ({ page }) => {
+  const before = await scaleCount(page);
+  const device = nextDeviceNo();
+  await gotoScale(page);
+  await page.getByTestId("scale-device").fill(device);
+  await page.getByTestId("scale-date").fill("2026-09-13");
+  await fillScalePoint(page, 1, "0", "100");        // 标准非正
+  await fillScalePoint(page, 2, "500", "1.0001");   // 实测四位小数
+  await fillScalePoint(page, 3, "200", "abc");      // 实测非十进制
+
+  const postRequests: string[] = [];
+  page.on("request", (req) => {
+    if (req.method() === "POST" && req.url().includes("/api/scale-checks"))
+      postRequests.push(req.url());
+  });
+
+  await page.getByTestId("scale-submit").click();
+
+  await expect(page.getByTestId("scale-error-0-standard")).toContainText("必须大于零");
+  await expect(page.getByTestId("scale-error-1-measured")).toContainText("最多三位小数");
+  await expect(page.getByTestId("scale-error-2-measured")).toContainText("十进制");
+  expect(postRequests).toEqual([]);
+  await expect(page.getByTestId("scale-saved")).toHaveCount(0);
+
+  // 当前输入保留，可就地修改
+  await expect(page.getByLabel("第1测点标准重量（克）")).toHaveValue("0");
+  await expect(page.getByLabel("第2测点实测重量（克）")).toHaveValue("1.0001");
+
+  // 台账数量不变（直接绕开页面再验证后端对各非法形态也 400 且零落库）
+  const badPayloads = [
+    { device_no: device, check_date: "2026-02-30", points: [
+      { standard: "1", measured: "1" }, { standard: "1", measured: "1" }, { standard: "1", measured: "1" }] },
+    { device_no: device, check_date: "2026/09/13", points: [
+      { standard: "1", measured: "1" }, { standard: "1", measured: "1" }, { standard: "1", measured: "1" }] },
+    { device_no: device, check_date: "2026-09-13", points: [
+      { standard: "1", measured: "1" }, { standard: "1", measured: "1" }] },
+    { device_no: "  ", check_date: "2026-09-13", points: [
+      { standard: "1", measured: "1" }, { standard: "1", measured: "1" }, { standard: "1", measured: "1" }] },
+  ];
+  for (const data of badPayloads) {
+    const r = await page.request.post("/api/scale-checks", { data });
+    expect(r.status()).toBe(400);
+  }
+  expect(await scaleCount(page)).toBe(before);
+});
+
+test("秤检同日重复：页面与后端都拒绝，保留输入且台账数量不变", async ({ page }) => {
+  const device = nextDeviceNo();
+  const data = {
+    device_no: device,
+    check_date: "2026-09-13",
+    points: [
+      { standard: "1000.000", measured: "1000.100" },
+      { standard: "500.000", measured: "499.900" },
+      { standard: "200.000", measured: "200.000" },
+    ],
+  };
+  const first = await page.request.post("/api/scale-checks", { data });
+  expect(first.status()).toBe(201);
+  const before = await scaleCount(page);
+
+  await gotoScale(page);
+  await page.getByTestId("scale-device").fill(device);
+  await page.getByTestId("scale-date").fill("2026-09-13");
+  await fillScalePoint(page, 1, "1000.000", "1000.200");
+  await fillScalePoint(page, 2, "500.000", "500.000");
+  await fillScalePoint(page, 3, "200.000", "200.100");
+
+  // 本地预判重复：不发 POST，提示重复日期，输入保留
+  const postUrls: string[] = [];
+  page.on("request", (req) => {
+    if (req.method() === "POST" && req.url().includes("/api/scale-checks"))
+      postUrls.push(req.url());
+  });
+  await page.getByTestId("scale-submit").click();
+  await expect(page.getByTestId("scale-date-error")).toContainText("已有秤检记录");
+  expect(postUrls).toEqual([]);
+  await expect(page.getByLabel("第1测点实测重量（克）")).toHaveValue("1000.200");
+
+  // 直接打后端重复提交：409，回滚后只剩第一条
+  const dup = await page.request.post("/api/scale-checks", { data });
+  expect(dup.status()).toBe(409);
+  const dupBody = await dup.json();
+  expect(dupBody.detail).toContain(device);
+  expect(dupBody.detail).toContain("2026-09-13");
+  expect(await scaleCount(page)).toBe(before);
+
+  // 同设备不同日期、不同设备同日期都允许
+  const otherDay = await page.request.post("/api/scale-checks", {
+    data: { ...data, check_date: "2026-09-14" },
+  });
+  expect(otherDay.status()).toBe(201);
+  const otherDevice = await page.request.post("/api/scale-checks", {
+    data: { ...data, device_no: nextDeviceNo() },
+  });
+  expect(otherDevice.status()).toBe(201);
+});
+
+test("秤检独立于批次：秤检不阻断批次创建，批次列表/详情行为保持原样", async ({ page }) => {
+  // 先有一条不合格秤检
+  const device = nextDeviceNo();
+  const scale = await page.request.post("/api/scale-checks", {
+    data: {
+      device_no: device,
+      check_date: "2026-09-13",
+      points: [
+        { standard: "100.000", measured: "100.000" },
+        { standard: "100.000", measured: "100.000" },
+        { standard: "100.000", measured: "100.501" },
+      ],
+    },
+  });
+  expect(scale.status()).toBe(201);
+  expect((await scale.json()).passed).toBe(false);
+
+  // 批次核算照常闭合保存（不被秤检阻断，也不读取秤检结果）
+  const batchNo = `SCL-IND-${scaleStamp}-${scaleCounter}`;
+  await page.goto("/");
+  await page.getByTestId("batch-no").fill(batchNo);
+  await page.getByLabel("领料第1笔重量（克）").fill("1000.000");
+  await page.getByLabel("成品第1笔重量（克）").fill("1000.000");
+  await expect(page.getByTestId("preview-verdict")).toHaveText("预览裁决：闭合");
+  await page.getByTestId("submit").click();
+  await expect(page.getByTestId("detail-verdict")).toHaveText("闭合");
+
+  // 批次资源里不含秤检；秤检资源里不含批次
+  const batches = (await (await page.request.get("/api/batches")).json()) as Array<{
+    batch_no: string;
+  }>;
+  expect(batches.some((b) => b.batch_no === batchNo)).toBe(true);
+  const scales = (await (await page.request.get("/api/scale-checks")).json()) as Array<{
+    device_no: string;
+  }>;
+  expect(scales.some((s) => s.device_no === device)).toBe(true);
+});

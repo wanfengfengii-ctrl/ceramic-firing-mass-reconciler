@@ -11,6 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .calc import WeightValidationError
 from .db import get_session, init_db
 from .importer import ImportRejectedError, preview_import
+from .scale import ScaleValidationError
+from .scale_service import (
+    DuplicateScaleCheckError,
+    create_scale_check,
+    list_scale_checks,
+)
 from .schemas import (
     BatchCompare,
     BatchDetail,
@@ -18,6 +24,8 @@ from .schemas import (
     BatchSummary,
     ImportPreviewIn,
     ImportPreviewOut,
+    ScaleCheckIn,
+    ScaleCheckOut,
 )
 from .service import (
     BatchNotFoundError,
@@ -78,6 +86,29 @@ async def _import_rejected_handler(
     )
 
 
+@app.exception_handler(ScaleValidationError)
+async def _scale_validation_handler(
+    request: Request, exc: ScaleValidationError
+) -> JSONResponse:
+    # 秤检语义非法：400 整体拒绝（事务已回滚，台账不增加记录）
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(DuplicateScaleCheckError)
+async def _scale_duplicate_handler(
+    request: Request, exc: DuplicateScaleCheckError
+) -> JSONResponse:
+    # 同设备同日期重复秤检：明确指出重复的设备与日期
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": str(exc),
+            "device_no": exc.device_no,
+            "check_date": exc.check_date,
+        },
+    )
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -118,3 +149,22 @@ async def compare(
     batch_id: int, base_id: int, session: AsyncSession = Depends(get_session)
 ) -> BatchCompare:
     return await compare_batches(session, batch_id, base_id)
+
+
+# ---------------------------------------------------------------------------
+# 日常秤检台账：独立资源，不参与、不阻断批次核算
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/scale-checks", response_model=ScaleCheckOut, status_code=201)
+async def post_scale_check(
+    payload: ScaleCheckIn, session: AsyncSession = Depends(get_session)
+) -> ScaleCheckOut:
+    return await create_scale_check(session, payload)
+
+
+@app.get("/api/scale-checks", response_model=list[ScaleCheckOut])
+async def get_scale_checks(
+    session: AsyncSession = Depends(get_session),
+) -> list[ScaleCheckOut]:
+    return await list_scale_checks(session)

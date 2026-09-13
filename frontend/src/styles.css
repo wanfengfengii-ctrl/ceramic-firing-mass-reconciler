@@ -456,3 +456,97 @@ header h1 {
 .delta-zero {
   color: #7b8794;
 }
+
+/* ---- 工作台切换 ---- */
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin: 16px 0 20px;
+  border-bottom: 2px solid #e4e7eb;
+}
+
+.tab {
+  padding: 10px 20px;
+  border: none;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -2px;
+  background: none;
+  color: #52606d;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.tab-active {
+  color: #1a56db;
+  border-bottom-color: #1a56db;
+  font-weight: 700;
+}
+
+/* ---- 日常秤检工作台 ---- */
+.scale-meta {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.scale-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.scale-field label {
+  color: #52606d;
+  font-size: 0.9rem;
+}
+
+.scale-field input {
+  padding: 8px;
+  border: 1px solid #cbd2d9;
+  border-radius: 6px;
+  font-size: 1rem;
+  min-width: 200px;
+}
+
+.scale-field.field-invalid input {
+  border-color: #c52a2a;
+  background: #fdf3f3;
+}
+
+.field-error {
+  color: #c52a2a;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.scale-points-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 8px;
+}
+
+.scale-points-table th,
+.scale-points-table td {
+  padding: 8px 6px;
+  border-bottom: 1px solid #eef1f4;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+.scale-points-table .field-error {
+  display: block;
+  margin-top: 4px;
+}
+
+.scale-verdict-pending {
+  background: #f1f5f9;
+  color: #52606d;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.scale-result {
+  margin-top: 16px;
+  border-color: #b6c8f5;
+}

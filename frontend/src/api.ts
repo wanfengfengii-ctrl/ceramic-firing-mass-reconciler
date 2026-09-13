@@ -81,6 +81,39 @@ export interface BatchIn {
   entries: Record<Kind, EntryIn[]>;
 }
 
+// ---------------------------------------------------------------------------
+// 日常秤检台账（独立资源：与批次接口互不引用）
+// ---------------------------------------------------------------------------
+
+export interface ScalePointIn {
+  standard: string;
+  measured: string;
+}
+
+export interface ScalePointOut {
+  seq: number;
+  standard: string;
+  measured: string;
+  /** 实测 − 标准，带符号，固定三位小数字符串 */
+  deviation: string;
+}
+
+export interface ScaleCheck {
+  id: number;
+  device_no: string;
+  check_date: string; // YYYY-MM-DD
+  points: ScalePointOut[];
+  passed: boolean;
+  verdict: string; // “合格” / “不合格”
+  created_at: string;
+}
+
+export interface ScaleCheckIn {
+  device_no: string;
+  check_date: string;
+  points: ScalePointIn[];
+}
+
 /** 导入预检的核算预览：与批次详情相同的十进制字段，不含身份信息。 */
 export interface ImportReckoning {
   issued_total: string;
@@ -150,6 +183,15 @@ export const api = {
     return request("/api/batches/import-preview", {
       method: "POST",
       body: JSON.stringify({ content }),
+    });
+  },
+  listScaleChecks(): Promise<ScaleCheck[]> {
+    return request("/api/scale-checks");
+  },
+  createScaleCheck(payload: ScaleCheckIn): Promise<ScaleCheck> {
+    return request("/api/scale-checks", {
+      method: "POST",
+      body: JSON.stringify(payload),
     });
   },
 };

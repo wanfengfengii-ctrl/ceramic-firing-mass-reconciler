@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -84,3 +85,49 @@ class WeightEntry(Base):
     count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     batch: Mapped[Batch] = relationship(back_populates="entries")
+
+
+class ScaleCheck(Base):
+    """开工前的日常秤检台账（独立于批次核算：不参与、不阻断任何批次）。
+
+    以设备编号 + 检验日期唯一保存一次；三组测点的标准值、实测值、带符号
+    偏差与当次结论全部写入本表，刷新后可按检验日期倒序完整恢复。
+    """
+
+    __tablename__ = "scale_checks"
+    __table_args__ = (
+        # 三个测点的标准/实测均须为正数（偏差带符号，允许 ≤ 0）
+        CheckConstraint(
+            "standard_1 > 0 AND standard_2 > 0 AND standard_3 > 0",
+            name="scale_standard_positive_check",
+        ),
+        CheckConstraint(
+            "measured_1 > 0 AND measured_2 > 0 AND measured_3 > 0",
+            name="scale_measured_positive_check",
+        ),
+        # 同一设备同一天唯一一次秤检
+        UniqueConstraint("device_no", "check_date", name="uq_scale_device_date"),
+        Index("ix_scale_checks_check_date", "check_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    device_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    check_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    # 三组测点（三位小数，单位克）；偏差 = 实测 − 标准，带符号
+    standard_1: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    measured_1: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    deviation_1: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    standard_2: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    measured_2: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    deviation_2: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    standard_3: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    measured_3: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    deviation_3: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+
+    # 裁决快照：三组测点偏差绝对值都不超过 0.500 g 时合格
+    passed: Mapped[bool] = mapped_column(nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
