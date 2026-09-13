@@ -1,22 +1,33 @@
 import { useEffect, useState } from "react";
 import { EntryForm, ReckoningPanel } from "./components/EntryForm";
 import { DetailView } from "./components/DetailView";
-import { KINDS, type Kind } from "./domain";
+import {
+  KINDS,
+  type FocusTarget,
+  type FormRow,
+  type Kind,
+  isBlankRow,
+  newSingleRow,
+  validateRows,
+} from "./domain";
+import type { EntryIn } from "./api";
 import { ApiError, api, type BatchDetail, type BatchSummary } from "./api";
 
-type Rows = Record<Kind, string[]>;
+type Rows = Record<Kind, FormRow[]>;
 
 const emptyRows = (): Rows => ({
-  issued: [""],
-  returned: [""],
-  product: [""],
-  scrap: [""],
+  issued: [newSingleRow()],
+  returned: [newSingleRow()],
+  product: [newSingleRow()],
+  scrap: [newSingleRow()],
 });
 
 export default function App() {
   const [rows, setRows] = useState<Rows>(emptyRows);
   const [batchNo, setBatchNo] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // 当前错误定位到的分区/行；驱动对应分区滚动并聚焦输入
+  const [errorFocus, setErrorFocus] = useState<FocusTarget | null>(null);
   const [saving, setSaving] = useState(false);
   const [detail, setDetail] = useState<BatchDetail | null>(null);
   const [list, setList] = useState<BatchSummary[]>([]);
@@ -37,16 +48,46 @@ export default function App() {
     void refreshList();
   }, []);
 
+  const changeRows = (kind: Kind, next: FormRow[]) => {
+    setRows((r) => ({ ...r, [kind]: next }));
+    setErrorFocus(null);
+  };
+
   const submit = async () => {
     setError(null);
-    const entries = Object.fromEntries(
-      KINDS.map((k) => [k, rows[k].map((v) => v.trim()).filter(Boolean)]),
-    ) as Record<Kind, string[]>;
+    setErrorFocus(null);
 
     if (!batchNo.trim()) {
       setError("请先填写批次号");
       return;
     }
+
+    // 提交前本地十进制校验（与后端规则一致）；非法时定位到分区与行号
+    const checked = validateRows(rows);
+    if (!checked.ok) {
+      setError(checked.error);
+      setErrorFocus(checked.focus);
+      return;
+    }
+
+    // 空白占位行不上送；单笔上送字符串，成组上送依据对象（乘积由后端重算）
+    const entries = Object.fromEntries(
+      KINDS.map((k): [Kind, EntryIn[]] => [
+        k,
+        rows[k]
+          .filter((row) => !isBlankRow(row))
+          .map((row) =>
+            row.mode === "single"
+              ? row.weight.trim()
+              : {
+                  mode: "group" as const,
+                  unit_weight: row.unitWeight.trim(),
+                  count: Number(row.count.trim()),
+                },
+          ),
+      ]),
+    ) as Record<Kind, EntryIn[]>;
+
     setSaving(true);
     try {
       const saved = await api.create({ batch_no: batchNo.trim(), entries });
@@ -77,6 +118,7 @@ export default function App() {
         <h1>试烧窑批次核算站</h1>
         <p className="hint">
           所有重量以十进制克（g）输入，最多三位小数且必须大于零；裁决仅使用十进制运算。
+          连续称量同规格匣钵/料桶时，可把某一切换为“成组”，按“单份重量 × 份数”录入。
         </p>
       </header>
 
@@ -96,8 +138,9 @@ export default function App() {
           <EntryForm
             key={kind}
             kind={kind}
-            values={rows[kind]}
-            onChange={(next) => setRows((r) => ({ ...r, [kind]: next }))}
+            rows={rows[kind]}
+            onChange={(next) => changeRows(kind, next)}
+            errorSeq={errorFocus?.kind === kind ? errorFocus.seq : null}
           />
         ))}
         <ReckoningPanel rowsByKind={rows} />

@@ -3,26 +3,40 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .calc import KINDS, WeightValidationError, reckon
+from .calc import (
+    KINDS,
+    WeightValidationError,
+    prepare_entries,
+    reckon_prepared,
+)
 from .models import Batch, WeightEntry
-from .schemas import BatchDetail, BatchSummary, EntryOut, q3
+from .schemas import BatchDetail, BatchSummary, EntryOut, GroupEntryIn, q3
 
 
 async def create_batch(session: AsyncSession, batch_no: str, raw_entries: dict) -> BatchDetail:
     """整批校验 + 十进制核算 + 落库。
 
+    成组行在 calc 层用 Decimal 重新乘出采用重量（不信任任何外部乘积），
     任何一步失败都回滚：非法批次不会在库里留下主表行或任何原始称重行。
     """
 
     try:
-        result = reckon(raw_entries)  # 非法输入在此抛 WeightValidationError
+        # 单笔字符串原样进入；成组 pydantic 模型转回 dict，交由 calc 层复算
+        raw_rows = {
+            kind: [
+                row.model_dump() if isinstance(row, GroupEntryIn) else row
+                for row in (raw_entries.get(kind) or [])
+            ]
+            for kind in KINDS
+        }
+        prepared = prepare_entries(raw_rows)
+        result = reckon_prepared(prepared)  # 非法输入在此抛 WeightValidationError
     except WeightValidationError:
         await session.rollback()
         raise
@@ -41,17 +55,20 @@ async def create_batch(session: AsyncSession, batch_no: str, raw_entries: dict) 
     )
     session.add(batch)
 
-    # 每笔原始重量逐行保存，保留分区与顺序，供日后复算
+    # 每行保存采用重量；成组行另存录入方式/单份/份数，供详情还原算式
     seq_counter: dict[str, int] = defaultdict(int)
     for kind in KINDS:
-        for weight in raw_entries.get(kind) or []:
+        for entry in prepared[kind]:
             seq_counter[kind] += 1
             session.add(
                 WeightEntry(
                     batch=batch,
                     kind=kind,
                     seq=seq_counter[kind],
-                    weight=Decimal(str(weight).strip()),
+                    weight=entry.weight,
+                    entry_mode=entry.mode if entry.mode == "group" else None,
+                    unit_weight=entry.unit_weight,
+                    count=entry.count,
                 )
             )
 
@@ -96,7 +113,16 @@ def _entries_by_kind(batch: Batch) -> dict[str, list[EntryOut]]:
     grouped: dict[str, list[EntryOut]] = {kind: [] for kind in KINDS}
     for e in batch.entries:
         grouped.setdefault(e.kind, [])
-        grouped[e.kind].append(EntryOut(seq=e.seq, weight=q3(e.weight)))
+        is_group = e.entry_mode == "group"
+        grouped[e.kind].append(
+            EntryOut(
+                seq=e.seq,
+                weight=q3(e.weight),
+                mode="group" if is_group else "single",
+                unit_weight=q3(e.unit_weight) if is_group and e.unit_weight is not None else None,
+                count=e.count if is_group else None,
+            )
+        )
     return grouped
 
 

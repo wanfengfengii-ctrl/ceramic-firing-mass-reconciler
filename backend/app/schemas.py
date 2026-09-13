@@ -11,17 +11,37 @@ Kind = Literal["issued", "returned", "product", "scrap"]
 _ALLOWED_KINDS = {"issued", "returned", "product", "scrap"}
 
 
+class GroupEntryIn(BaseModel):
+    """成组录入：纸单“单桶重量×桶数”。
+
+    mode 固定为 "group"；单份重量为十进制文本，份数为 2–999 的整数。
+    乘积合法性（存储范围等）由 calc 层用 Decimal 复算后判定。
+    """
+
+    # strict：unit_weight 给 JSON 数字会被拒绝；count 只接受 int（True 除外）
+    # extra=forbid：对象字段矛盾（多出纸单之外的键）在入口即整批拒绝
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    mode: Literal["group"]
+    # 语义校验（空文本、>0、三位小数、份数 2–999、乘积范围）全部在 calc 层完成，
+    # 以便错误信息能定位到“分区 第 n 笔”；这里只固定 JSON 形状与类型。
+    unit_weight: str
+    count: int
+
+
 class BatchIn(BaseModel):
     # strict：JSON 里的数字不会悄悄变成字符串，重量必须是十进制文本
     model_config = ConfigDict(strict=True)
 
     batch_no: str = Field(min_length=1, max_length=64)
-    # 每笔重量以十进制字符串提交，例如 "1200.500"
-    entries: dict[str, list[str]]
+    # 每行为单笔十进制字符串（"1200.500"）或成组对象，两种方式可在同批混用
+    entries: dict[str, list[str | GroupEntryIn]]
 
     @field_validator("entries")
     @classmethod
-    def _check_kinds(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+    def _check_kinds(
+        cls, value: dict[str, list[str | GroupEntryIn]]
+    ) -> dict[str, list[str | GroupEntryIn]]:
         unknown = set(value) - _ALLOWED_KINDS
         if unknown:
             raise ValueError(f"未知分区：{sorted(unknown)}")
@@ -39,6 +59,11 @@ class BatchIn(BaseModel):
 class EntryOut(BaseModel):
     seq: int
     weight: str
+    # 成组依据（可空）：旧记录与单笔行均不返回这三个字段以外的形式——
+    # mode 为 None 即单笔；group 时可据 unit_weight × count 还原算式
+    mode: Literal["single", "group"] | None = None
+    unit_weight: str | None = None
+    count: int | None = None
 
 
 class BatchDetail(BaseModel):

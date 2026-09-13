@@ -2,9 +2,22 @@
 
 import type { Kind } from "./domain";
 
+/** 单笔行：直接提交十进制字符串；成组行：提交录入方式 + 单份重量 + 份数。 */
+export type EntryIn = string | GroupEntryIn;
+
+export interface GroupEntryIn {
+  mode: "group";
+  unit_weight: string;
+  count: number;
+}
+
 export interface EntryOut {
   seq: number;
   weight: string;
+  // 旧记录与单笔行 mode 为 "single"（依据字段为 null）；group 时可还原算式
+  mode?: "single" | "group" | null;
+  unit_weight?: string | null;
+  count?: number | null;
 }
 
 export interface BatchDetail {
@@ -37,7 +50,7 @@ export interface BatchSummary {
 
 export interface BatchIn {
   batch_no: string;
-  entries: Record<Kind, string[]>;
+  entries: Record<Kind, EntryIn[]>;
 }
 
 export class ApiError extends Error {

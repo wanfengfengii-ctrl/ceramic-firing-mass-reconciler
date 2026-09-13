@@ -76,11 +76,18 @@ export function DetailView({ detail }: DetailViewProps) {
             <h4>{KIND_LABEL[kind]}</h4>
             {detail.entries[kind]?.length ? (
               <ol>
-                {detail.entries[kind].map((e) => (
-                  <li key={e.seq}>
-                    第 {e.seq} 笔：{e.weight} g
-                  </li>
-                ))}
+                {detail.entries[kind].map((e) =>
+                  e.mode === "group" ? (
+                    <li key={e.seq} data-testid={`raw-${kind}-${e.seq}-group`}>
+                      第 {e.seq} 笔：{e.unit_weight} g × {e.count} 桶 ={" "}
+                      <strong>{e.weight} g</strong>
+                    </li>
+                  ) : (
+                    <li key={e.seq}>
+                      第 {e.seq} 笔：{e.weight} g
+                    </li>
+                  ),
+                )}
               </ol>
             ) : (
               <p className="empty">无</p>

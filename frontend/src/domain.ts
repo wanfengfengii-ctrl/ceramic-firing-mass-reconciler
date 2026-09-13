@@ -3,10 +3,34 @@
  *
  * 裁决以后端 FastAPI + PostgreSQL 保存的结果为准；这里把所有重量
  * 放大为“毫克”整数（BigInt），全程不使用二进制浮点，保证预览一致。
+ *
+ * 每个称重分区支持两种行：
+ * - 单笔行：直接填写一次称重的克重；
+ * - 成组行：同规格匣钵/料桶连称，填“单份重量 × 份数”，份数为 2–999 的整数，
+ *   页面立即乘出该行采用重量并带入小计与闭合预览。
  */
 
 export type Kind = "issued" | "returned" | "product" | "scrap";
 export const KINDS: Kind[] = ["issued", "returned", "product", "scrap"];
+
+export type EntryMode = "single" | "group";
+
+export interface FormRow {
+  mode: EntryMode;
+  /** 单笔重量（mode === "single" 时使用） */
+  weight: string;
+  /** 单份重量（mode === "group" 时使用，克） */
+  unitWeight: string;
+  /** 份数（2–999 的整数，文本态录入） */
+  count: string;
+}
+
+export const newSingleRow = (): FormRow => ({
+  mode: "single",
+  weight: "",
+  unitWeight: "",
+  count: "",
+});
 
 export type Parsed =
   | { ok: true; mg: bigint }
@@ -14,6 +38,13 @@ export type Parsed =
 
 const MILLIGRAMS_PER_GRAM = 1000n;
 const TOLERANCE_FLOOR_MG = 5000n; // 5 克
+
+// 成组份数范围
+export const MIN_GROUP_COUNT = 2;
+export const MAX_GROUP_COUNT = 999;
+// 与后端 Numeric(14,3) 对齐的存储上限：99999999999.999 g
+export const MAX_STORED_MG = 99_999_999_999_999n;
+export const MAX_STORED_GRAMS = "99999999999.999";
 
 const DECIMAL_RE =
   /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
@@ -105,12 +136,89 @@ export function reckonMg(totals: Record<Kind, bigint>): Reckoning {
   };
 }
 
-/** 校验整批原始字符串行；返回解析值或第一个错误（含分区与行号）。 */
-export function validateAndParse(
-  rowsByKind: Record<Kind, string[]>,
-):
+export const KIND_LABEL: Record<Kind, string> = {
+  issued: "领料",
+  returned: "退料",
+  product: "成品",
+  scrap: "废料",
+};
+
+/** 完全空白的行视为尚未录入的占位行（单笔空重量；成组两个字段都空）。 */
+export function isBlankRow(row: FormRow): boolean {
+  if (row.mode === "single") return row.weight.trim() === "";
+  return row.unitWeight.trim() === "" && row.count.trim() === "";
+}
+
+export type RowEval =
+  | { ok: true; mg: bigint; unitMg?: bigint; count?: number }
+  | { ok: false; error: string };
+
+/** 评估一行：单笔直接解析；成组解析单份、校验份数并做整数乘法。 */
+export function evaluateRow(row: FormRow): RowEval {
+  if (row.mode === "single") {
+    const parsed = parseGrams(row.weight);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    if (parsed.mg > MAX_STORED_MG) {
+      return { ok: false, error: `重量超出存储范围（≤ ${MAX_STORED_GRAMS} g）` };
+    }
+    return { ok: true, mg: parsed.mg };
+  }
+
+  const unitParsed = parseGrams(row.unitWeight);
+  if (!unitParsed.ok) {
+    return { ok: false, error: `单份重量${unitParsed.error}` };
+  }
+  if (unitParsed.mg > MAX_STORED_MG) {
+    return { ok: false, error: `单份重量超出存储范围（≤ ${MAX_STORED_GRAMS} g）` };
+  }
+
+  const countText = row.count.trim();
+  if (!/^\d+$/.test(countText)) {
+    return { ok: false, error: `份数必须是 ${MIN_GROUP_COUNT}–${MAX_GROUP_COUNT} 的整数` };
+  }
+  const count = Number(countText);
+  if (count < MIN_GROUP_COUNT || count > MAX_GROUP_COUNT) {
+    return { ok: false, error: `份数必须在 ${MIN_GROUP_COUNT} 与 ${MAX_GROUP_COUNT} 之间` };
+  }
+
+  // 毫克（BigInt）× 整数份数：与后端 Decimal 乘法逐位相同，无二进制浮点
+  const mg = unitParsed.mg * BigInt(count);
+  if (mg > MAX_STORED_MG) {
+    return {
+      ok: false,
+      error:
+        `采用重量 ${formatGrams(mg)} g 超出存储范围` +
+        `（${formatGrams(unitParsed.mg)} g × ${count}，上限 ${MAX_STORED_GRAMS} g）`,
+    };
+  }
+  return { ok: true, mg, unitMg: unitParsed.mg, count };
+}
+
+/** 只合计单个分区的行（不套用整批规则）；任何一笔已填写行非法返回 null。 */
+export function subtotalRowsMg(rows: FormRow[]): bigint | null {
+  let total = 0n;
+  for (const row of rows) {
+    if (isBlankRow(row)) continue;
+    const ev = evaluateRow(row);
+    if (!ev.ok) return null;
+    total += ev.mg;
+  }
+  return total;
+}
+
+export interface FocusTarget {
+  kind: Kind;
+  /** 行在界面上的下标（0 起，含占位行） */
+  seq: number;
+}
+
+/**
+ * 校验整批行；返回每行采用重量与分区合计，或第一个错误。
+ * 错误信息含分区与行号，focus 指向界面中对应输入，供页面滚动/聚焦。
+ */
+export function validateRows(rowsByKind: Record<Kind, FormRow[]>):
   | { ok: true; weights: Record<Kind, bigint[]>; totals: Record<Kind, bigint> }
-  | { ok: false; error: string } {
+  | { ok: false; error: string; focus: FocusTarget } {
   const weights: Record<Kind, bigint[]> = {
     issued: [],
     returned: [],
@@ -125,48 +233,47 @@ export function validateAndParse(
   };
 
   for (const kind of KINDS) {
-    // 空白项视为尚未录入的占位行，跳过；行号只数实际填写的行
-    const filled = rowsByKind[kind]
-      .map((raw) => raw.trim())
-      .filter((raw) => raw !== "");
-    for (let idx = 0; idx < filled.length; idx++) {
-      const parsed = parseGrams(filled[idx]);
-      if (!parsed.ok) {
+    let filledNo = 0;
+    for (let idx = 0; idx < rowsByKind[kind].length; idx++) {
+      const row = rowsByKind[kind][idx];
+      if (isBlankRow(row)) continue;
+      filledNo += 1;
+      const ev = evaluateRow(row);
+      if (!ev.ok) {
         return {
           ok: false,
-          error: `${KIND_LABEL[kind]} 第 ${idx + 1} 笔：${parsed.error}`,
+          error: `${KIND_LABEL[kind]} 第 ${filledNo} 笔：${ev.error}`,
+          focus: { kind, seq: idx },
         };
       }
-      weights[kind].push(parsed.mg);
-      totals[kind] += parsed.mg;
+      weights[kind].push(ev.mg);
+      totals[kind] += ev.mg;
+      if (totals[kind] > MAX_STORED_MG) {
+        return {
+          ok: false,
+          error: `${KIND_LABEL[kind]}合计 ${formatGrams(totals[kind])} g 超出存储范围` +
+            `（≤ ${MAX_STORED_GRAMS} g）`,
+          focus: { kind, seq: idx },
+        };
+      }
     }
   }
 
   if (weights.issued.length === 0) {
-    return { ok: false, error: "领料至少需要一笔称重" };
+    return {
+      ok: false,
+      error: "领料至少需要一笔称重",
+      focus: { kind: "issued", seq: 0 },
+    };
   }
   if (totals.returned > totals.issued) {
-    return { ok: false, error: "同批退料总量不得大于领料总量" };
+    // 定位到退料分区第一笔
+    const firstReturned = rowsByKind.returned.findIndex((r) => !isBlankRow(r));
+    return {
+      ok: false,
+      error: "同批退料总量不得大于领料总量",
+      focus: { kind: "returned", seq: Math.max(firstReturned, 0) },
+    };
   }
   return { ok: true, weights, totals };
-}
-
-export const KIND_LABEL: Record<Kind, string> = {
-  issued: "领料",
-  returned: "退料",
-  product: "成品",
-  scrap: "废料",
-};
-
-/** 只解析并合计单个分区（不套用整批规则）；任何一笔非法返回 null。 */
-export function subtotalMg(values: string[]): bigint | null {
-  let total = 0n;
-  for (const raw of values) {
-    const text = raw.trim();
-    if (text === "") continue;
-    const parsed = parseGrams(text);
-    if (!parsed.ok) return null;
-    total += parsed.mg;
-  }
-  return total;
 }

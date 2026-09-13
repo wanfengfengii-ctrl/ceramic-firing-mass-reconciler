@@ -18,9 +18,9 @@ const detailClosed: BatchDetail = {
   difference: "+5.000",
   tolerance: "5",
   entries: {
-    issued: [{ seq: 1, weight: "1000.000" }],
+    issued: [{ seq: 1, weight: "1000.000", mode: "single" }],
     returned: [],
-    product: [{ seq: 1, weight: "1005.000" }],
+    product: [{ seq: 1, weight: "1005.000", mode: "single" }],
     scrap: [],
   },
   created_at: "2026-09-12T10:00:00+00:00",
@@ -97,7 +97,123 @@ describe("App 核算站", () => {
     expect(within(detail).getByTestId("raw-issued")).toHaveTextContent("1000.000");
   });
 
-  it("非法批次被整体拒绝：显示错误且没有详情", async () => {
+  it("成组录入：即时显示乘积并带入预览，提交依据对象，详情还原算式", async () => {
+    const user = userEvent.setup();
+    const groupDetail: BatchDetail = {
+      ...detailClosed,
+      id: 8,
+      batch_no: "G-8",
+      issued_total: "1100.000",
+      net_input: "1100.000",
+      output_total: "1100.000",
+      product_total: "1100.000",
+      difference: "+0.000",
+      entries: {
+        issued: [
+          { seq: 1, weight: "1000.000", mode: "single" },
+          { seq: 2, weight: "100.000", mode: "group", unit_weight: "12.500", count: 8 },
+        ],
+        returned: [],
+        product: [{ seq: 1, weight: "1100.000", mode: "single" }],
+        scrap: [],
+      },
+    };
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+        if (url === "/api/batches" && method === "POST") {
+          const payload = JSON.parse(init!.body as string);
+          // 单笔仍是字符串；成组是含录入方式/单份/份数的对象（不含乘积）
+          expect(payload.entries.issued[0]).toBe("1000");
+          expect(payload.entries.issued[1]).toEqual({
+            mode: "group",
+            unit_weight: "12.500",
+            count: 8,
+          });
+          return jsonResponse(groupDetail, 201);
+        }
+        return jsonResponse({ detail: "未预期" }, 500);
+      },
+    );
+
+    render(<App />);
+    await user.type(screen.getByTestId("batch-no"), "G-8");
+
+    const issuedPanel = screen.getByLabelText("领料分区");
+    const issuedWeight = within(issuedPanel).getByLabelText("领料第1笔重量（克）");
+    await user.clear(issuedWeight);
+    await user.type(issuedWeight, "1000");
+
+    // 添加第二行并切换为成组（DOM 顺序中第二个“成组”单选即第二行）
+    await user.click(within(issuedPanel).getByRole("button", { name: "+ 添加一笔领料" }));
+    await user.click(
+      within(issuedPanel).getAllByRole("radio", { name: "成组" })[1],
+    );
+
+    const unit = within(issuedPanel).getByLabelText("领料第2笔单份重量（克）");
+    const count = within(issuedPanel).getByLabelText("领料第2笔份数");
+    await user.type(unit, "12.500");
+    await user.type(count, "8");
+
+    // 页面十进制乘法即时显示采用重量
+    expect(within(issuedPanel).getByTestId("adopted-issued-1")).toHaveTextContent(
+      "= 100.000 g",
+    );
+    // 领料小计 = 1000 + 12.5*8 = 1100
+    expect(within(issuedPanel).getByTestId("subtotal-issued")).toHaveTextContent("1100.000");
+
+    const productPanel = screen.getByLabelText("成品分区");
+    const productWeight = within(productPanel).getByLabelText("成品第1笔重量（克）");
+    await user.clear(productWeight);
+    await user.type(productWeight, "1100");
+    expect(screen.getByTestId("preview-difference")).toHaveTextContent("+0.000");
+    expect(screen.getByTestId("preview-verdict")).toHaveTextContent("闭合");
+
+    await user.click(screen.getByTestId("submit"));
+
+    const detail = await screen.findByTestId("batch-detail");
+    const rawIssued = within(detail).getByTestId("raw-issued");
+    // 成组行还原“单份 × 份数 = 采用重量”
+    const groupLine = within(rawIssued).getByTestId("raw-issued-2-group");
+    expect(groupLine).toHaveTextContent("12.500 g × 8 桶 = 100.000 g");
+  });
+
+  it("成组份数越界时本地定位到对应分区和行，且不发请求", async () => {
+    const user = userEvent.setup();
+    const postSpy = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ detail: "不应被调用" }, 500),
+    );
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+        if (url === "/api/batches" && method === "POST") return postSpy(url, init);
+        return jsonResponse({ detail: "未预期" }, 500);
+      },
+    );
+
+    render(<App />);
+    await user.type(screen.getByTestId("batch-no"), "BAD-GROUP");
+    const issuedPanel = screen.getByLabelText("领料分区");
+    await user.click(within(issuedPanel).getAllByRole("radio", { name: "成组" })[0]);
+    await user.type(within(issuedPanel).getByLabelText("领料第1笔单份重量（克）"), "12.5");
+    await user.type(within(issuedPanel).getByLabelText("领料第1笔份数"), "1000");
+
+    // 行内即时提示乘积错误
+    expect(within(issuedPanel).getByTestId("adopted-issued-0")).toHaveTextContent("份数");
+    // 预览也无法核算并定位行号
+    expect(screen.getByText(/当前输入尚不能核算/)).toHaveTextContent("领料 第 1 笔");
+
+    await user.click(screen.getByTestId("submit"));
+
+    const error = await screen.findByTestId("form-error");
+    expect(error).toHaveTextContent("领料 第 1 笔：份数必须在 2 与 999 之间");
+    expect(screen.queryByTestId("batch-detail")).not.toBeInTheDocument();
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
+  it("单笔非法重量在提交前被本地十进制校验拦下", async () => {
     const user = userEvent.setup();
     (fetch as ReturnType<typeof vi.fn>).mockImplementation(
       async (url: string, init?: RequestInit) => {
@@ -120,7 +236,7 @@ describe("App 核算站", () => {
     await user.click(screen.getByTestId("submit"));
 
     const error = await screen.findByTestId("form-error");
-    expect(error).toHaveTextContent("重量必须大于零");
+    expect(error).toHaveTextContent("必须大于零");
     expect(screen.queryByTestId("batch-detail")).not.toBeInTheDocument();
   });
 

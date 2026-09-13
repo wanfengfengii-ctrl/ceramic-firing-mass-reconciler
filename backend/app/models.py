@@ -58,6 +58,14 @@ class WeightEntry(Base):
     __table_args__ = (
         CheckConstraint("kind in ('issued','returned','product','scrap')", name="kind_check"),
         CheckConstraint("weight > 0", name="weight_positive_check"),
+        # 成组依据：单笔行三列均为 NULL；成组行为 'group' + 单份重量 + 份数
+        CheckConstraint("entry_mode in ('single','group')", name="entry_mode_check"),
+        CheckConstraint(
+            "entry_mode = 'single' OR "
+            "(unit_weight IS NOT NULL AND count IS NOT NULL "
+            "AND count BETWEEN 2 AND 999 AND unit_weight > 0)",
+            name="group_basis_check",
+        ),
         UniqueConstraint("batch_id", "kind", "seq", name="uq_batch_kind_seq"),
         Index("ix_weight_entries_batch_id", "batch_id"),
     )
@@ -68,7 +76,11 @@ class WeightEntry(Base):
     )
     kind: Mapped[str] = mapped_column(String(10), nullable=False)
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
-    # 每笔原始重量，三位小数，单位克
+    # 采用重量（单笔值或单份×份数），三位小数，单位克
     weight: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    # 成组依据（可空）：旧记录与单笔行均为 NULL，详情据此还原“单份×份数”算式
+    entry_mode: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    unit_weight: Mapped[Decimal | None] = mapped_column(Numeric(14, 3), nullable=True)
+    count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     batch: Mapped[Batch] = relationship(back_populates="entries")

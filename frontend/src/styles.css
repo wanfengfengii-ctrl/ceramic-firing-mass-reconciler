@@ -70,8 +70,16 @@ header h1 {
 .row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 8px;
+}
+
+.row-error {
+  outline: 2px solid #e2a4a4;
+  outline-offset: 2px;
+  border-radius: 6px;
+  background: #fdf3f3;
 }
 
 .row-label {
@@ -80,12 +88,62 @@ header h1 {
   font-size: 0.9rem;
 }
 
+.mode-switch {
+  display: inline-flex;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: #52606d;
+}
+
+.mode-switch label {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.fields {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.group-fields {
+  flex-wrap: wrap;
+}
+
 .weight-input {
   width: 130px;
   padding: 6px 8px;
   border: 1px solid #cbd2d9;
   border-radius: 6px;
   font-variant-numeric: tabular-nums;
+}
+
+.count-input {
+  width: 88px;
+  padding: 6px 8px;
+  border: 1px solid #cbd2d9;
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.adopted {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: #1a56db;
+  white-space: nowrap;
+}
+
+.adopted-error {
+  color: #c52a2a;
+  font-weight: 400;
+  font-size: 0.8rem;
+}
+
+.group-fields .adopted {
+  width: 100%;
+  padding-left: 4px;
 }
 
 .g {
