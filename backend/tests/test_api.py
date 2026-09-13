@@ -613,3 +613,196 @@ async def test_compare_is_read_only(client_fixture, clean) -> None:
         ).scalar_one()
     assert n_batches == 2
     assert n_entries == 4
+
+
+# ---------------------------------------------------------------------------
+# 称重文件导入预检：解析 CSV → 规范化行 + 核算预览；只读，绝不写库
+# ---------------------------------------------------------------------------
+
+IMPORT_URL = "/api/batches/import-preview"
+IMPORT_HEADER = "分区,重量,单份重量,份数"
+
+
+def import_csv(*rows: str, header: str = IMPORT_HEADER) -> dict:
+    return {"content": "\n".join([header, *rows]) + "\n"}
+
+
+async def test_import_preview_mixed_file_returns_rows_and_reckoning(
+    client_fixture, clean
+) -> None:
+    resp = client_fixture.post(
+        IMPORT_URL,
+        json=import_csv(
+            "领料,1000.000,,",
+            "领料,,12.500,8",
+            "退料,,10.000,5",
+            "成品,1040.000,,",
+            "废料,60.000,,",
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    d = resp.json()
+    assert d["row_count"] == 5
+
+    # 规范化行：单笔为三位小数字符串；成组带依据与十进制乘积
+    assert d["entries"]["issued"] == [
+        {"seq": 1, "weight": "1000.000", "mode": "single",
+         "unit_weight": None, "count": None},
+        {"seq": 2, "weight": "100.000", "mode": "group",
+         "unit_weight": "12.500", "count": 8},
+    ]
+    assert d["entries"]["returned"] == [
+        {"seq": 1, "weight": "50.000", "mode": "group",
+         "unit_weight": "10.000", "count": 5},
+    ]
+
+    # 核算预览与批次核算同一规则
+    p = d["preview"]
+    assert p["issued_total"] == "1100.000"
+    assert p["net_input"] == "1050.000"
+    assert p["output_total"] == "1100.000"
+    assert p["difference"] == "+50.000"
+    assert p["tolerance"] == "5"
+    assert p["closed"] is False
+    assert p["verdict"] == "不闭合"
+
+    # 预检不写库：批次与称重行均为零
+    from app.db import engine
+
+    async with AsyncSession(engine) as s:
+        n_batches = (await s.execute(text("SELECT count(*) FROM batches"))).scalar_one()
+        n_entries = (
+            await s.execute(text("SELECT count(*) FROM weight_entries"))
+        ).scalar_one()
+    assert n_batches == 0
+    assert n_entries == 0
+    assert client_fixture.get("/api/batches").json() == []
+
+
+async def test_import_preview_shuffled_partitions_keep_file_order(
+    client_fixture, clean
+) -> None:
+    resp = client_fixture.post(
+        IMPORT_URL,
+        json=import_csv(
+            "成品,100.000,,",
+            "领料,500.000,,",
+            "废料,10.000,,",
+            "领料,600.000,,",
+            "成品,200.000,,",
+            "退料,50.000,,",
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    d = resp.json()
+    assert [e["weight"] for e in d["entries"]["issued"]] == ["500.000", "600.000"]
+    assert [e["weight"] for e in d["entries"]["product"]] == ["100.000", "200.000"]
+    assert [e["weight"] for e in d["entries"]["scrap"]] == ["10.000"]
+    assert [e["weight"] for e in d["entries"]["returned"]] == ["50.000"]
+
+
+async def test_import_preview_confirmed_rows_save_through_existing_endpoint(
+    client_fixture, clean
+) -> None:
+    # 预检 → 用户确认 → 仍走 POST /api/batches：保存结果与直接录入完全一致
+    preview = client_fixture.post(
+        IMPORT_URL,
+        json=import_csv(
+            "领料,1000.000,,",
+            "领料,,12.500,8",
+            "退料,,10.000,5",
+            "成品,1040.000,,",
+            "废料,60.000,,",
+        ),
+    ).json()
+    entries = {
+        kind: [
+            (
+                {"mode": "group", "unit_weight": e["unit_weight"], "count": e["count"]}
+                if e["mode"] == "group"
+                else e["weight"]
+            )
+            for e in preview["entries"][kind]
+        ]
+        for kind in ("issued", "returned", "product", "scrap")
+    }
+    resp = client_fixture.post(
+        "/api/batches", json={"batch_no": "IMP-1", "entries": entries}
+    )
+    assert resp.status_code == 201, resp.text
+    d = resp.json()
+    assert d["difference"] == preview["preview"]["difference"]
+    assert d["verdict"] == preview["preview"]["verdict"]
+    assert d["entries"]["issued"][1] == {
+        "seq": 2, "weight": "100.000", "mode": "group",
+        "unit_weight": "12.500", "count": 8,
+    }
+
+    # 刷新详情：与保存响应一致
+    got = client_fixture.get(f"/api/batches/{d['id']}").json()
+    assert got == d
+
+
+async def test_import_rejection_points_to_original_line_and_writes_nothing(
+    client_fixture, clean
+) -> None:
+    from app.db import engine
+
+    # 表头第 1 行、空行第 3 行：非法重量在原始文件第 4 行
+    resp = client_fixture.post(
+        IMPORT_URL,
+        json=import_csv("领料,1000.000,,", "", "成品,abc,,"),
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["line"] == 4
+    assert "无法识别" in body["reason"]
+    assert body["detail"].startswith("第 4 行：")
+
+    # 各类整份拒绝：未知分区 / 重复表头 / 字段矛盾 / 重量非法 / 缺表头列
+    cases = [
+        (import_csv("原料,100.000,,"), 2, "未知分区"),
+        (import_csv("领料,100.000,12.500,"), 2, "字段矛盾"),
+        (import_csv("领料,,12.500,"), 2, "字段矛盾"),
+        (import_csv("领料,,12.500,1000"), 2, "份数"),
+        (import_csv("领料,1.0001,,"), 2, "最多三位小数"),
+        (import_csv("领料,100.000,,", header="分区,重量,重量,份数,单份重量"), 1, "重复表头"),
+        (import_csv("领料,100.000,", header="分区,重量,单份重量"), 1, "缺少表头列"),
+        (import_csv("领料,100.000,,", "退料,100.001,,"), None, "退料总量"),
+        (import_csv(), None, "领料"),
+    ]
+    for i, (payload, line, match) in enumerate(cases):
+        r = client_fixture.post(IMPORT_URL, json=payload)
+        assert r.status_code == 400, (i, r.text)
+        assert r.json()["line"] == line, (i, r.json())
+        assert match in r.json()["reason"], (i, r.json())
+
+    # 全部拒绝路径零落库
+    async with AsyncSession(engine) as s:
+        n_batches = (await s.execute(text("SELECT count(*) FROM batches"))).scalar_one()
+        n_entries = (
+            await s.execute(text("SELECT count(*) FROM weight_entries"))
+        ).scalar_one()
+    assert n_batches == 0
+    assert n_entries == 0
+    assert client_fixture.get("/api/batches").json() == []
+
+
+async def test_import_preview_accepts_bom_blank_lines_and_extra_columns(
+    client_fixture, clean
+) -> None:
+    resp = client_fixture.post(
+        IMPORT_URL,
+        json={
+            "content": "﻿重量,备注,分区,份数,单份重量\n"
+            "1000.000,早班,领料,,\n"
+            "\n"
+            ",,,\n"
+            "1005.000,,成品,,\n"
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    d = resp.json()
+    assert d["row_count"] == 2
+    assert d["preview"]["difference"] == "+5.000"
+    assert d["preview"]["verdict"] == "闭合"

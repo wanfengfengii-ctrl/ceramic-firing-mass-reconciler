@@ -81,10 +81,33 @@ export interface BatchIn {
   entries: Record<Kind, EntryIn[]>;
 }
 
+/** 导入预检的核算预览：与批次详情相同的十进制字段，不含身份信息。 */
+export interface ImportReckoning {
+  issued_total: string;
+  returned_total: string;
+  product_total: string;
+  scrap_total: string;
+  net_input: string;
+  output_total: string;
+  difference: string;
+  tolerance: string;
+  closed: boolean;
+  verdict: string;
+}
+
+/** 合法称重文件的预检结果：规范化行（各分区按文件行序）+ 核算预览。 */
+export interface ImportPreviewResponse {
+  row_count: number;
+  entries: Record<Kind, EntryOut[]>;
+  preview: ImportReckoning;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** 导入预检 400 时给出的 CSV 行号（文件级错误为 null）；其它接口无此字段 */
+    public line?: number | null,
   ) {
     super(message);
   }
@@ -97,13 +120,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!resp.ok) {
     let message = `请求失败（${resp.status}）`;
+    let line: number | null = null;
     try {
-      const body = (await resp.json()) as { detail?: string };
+      const body = (await resp.json()) as { detail?: string; line?: number | null };
       if (typeof body.detail === "string") message = body.detail;
+      if (typeof body.line === "number") line = body.line;
     } catch {
       // 非 JSON 错误体时保留默认消息
     }
-    throw new ApiError(resp.status, message);
+    throw new ApiError(resp.status, message, line);
   }
   return (await resp.json()) as T;
 }
@@ -120,5 +145,11 @@ export const api = {
   },
   compare(id: number, baseId: number): Promise<BatchCompare> {
     return request(`/api/batches/${id}/compare?base_id=${baseId}`);
+  },
+  importPreview(content: string): Promise<ImportPreviewResponse> {
+    return request("/api/batches/import-preview", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
   },
 };

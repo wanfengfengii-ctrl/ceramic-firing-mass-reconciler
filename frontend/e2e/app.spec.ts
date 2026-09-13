@@ -426,3 +426,189 @@ test("批次对比：闭合与不闭合互比、反向符号相反、自比阻�
   await expect(page.getByTestId("compare-verdict-change")).toContainText("不闭合 → 闭合");
 });
 
+// ---------------------------------------------------------------------------
+// 称重文件导入：预检 → 确认替换 → 现有方式提交保存；失败/取消不动当前内容
+// ---------------------------------------------------------------------------
+
+/** 通过隐藏的文件输入框选择一份 CSV（内容在内存中构造，不落临时文件）。 */
+async function uploadCsv(page: Page, name: string, content: string) {
+  await page.getByTestId("import-file").setInputFiles({
+    name,
+    mimeType: "text/csv",
+    buffer: Buffer.from(content, "utf-8"),
+  });
+}
+
+const MIXED_CSV = [
+  "分区,重量,单份重量,份数",
+  "领料,1000.000,,",
+  "领料,,12.500,8",
+  "退料,,10.000,5",
+  "成品,1040.000,,",
+  "废料,60.000,,",
+].join("\n");
+
+test("导入混合单笔与成组文件：预览、确认替换、保存与刷新详情一致", async ({ page }) => {
+  const no = nextBatchNo();
+  // 先手工填写批次号与一笔将被替换的内容，验证确认前不被动、确认后被替换
+  await page.getByTestId("batch-no").fill(no);
+  await fillRow(page, "成品", 1, "777.000");
+
+  await uploadCsv(page, "weigh-mixed.csv", MIXED_CSV);
+
+  // 预检面板：规范化行（含成组算式）与核算预览；手工内容尚未被替换
+  const preview = page.getByTestId("import-preview");
+  await expect(preview).toBeVisible();
+  await expect(page.getByTestId("import-raw-issued-2-group")).toHaveText(
+    "第 2 笔：12.500 g × 8 桶 = 100.000 g",
+  );
+  await expect(page.getByTestId("import-preview-issued")).toHaveText("1100.000 g");
+  await expect(page.getByTestId("import-preview-net")).toHaveText("1050.000 g");
+  await expect(page.getByTestId("import-preview-difference")).toHaveText("+50.000 g");
+  await expect(page.getByTestId("import-preview-verdict")).toHaveText("预览裁决：不闭合");
+  await expect(page.getByLabel("成品第1笔重量（克）")).toHaveValue("777.000");
+
+  // 确认导入：批次号保留，四个分区被导入行整体替换
+  await page.getByTestId("import-confirm").click();
+  await expect(page.getByTestId("import-preview")).toHaveCount(0);
+  await expect(page.getByTestId("batch-no")).toHaveValue(no);
+  await expect(page.getByLabel("领料第1笔重量（克）")).toHaveValue("1000.000");
+  await expect(page.getByLabel("领料第2笔单份重量（克）")).toHaveValue("12.500");
+  await expect(page.getByLabel("领料第2笔份数")).toHaveValue("8");
+  await expect(page.getByLabel("退料第1笔单份重量（克）")).toHaveValue("10.000");
+  await expect(page.getByLabel("成品第1笔重量（克）")).toHaveValue("1040.000");
+  await expect(page.getByLabel("废料第1笔重量（克）")).toHaveValue("60.000");
+
+  // 现有本地预览即时反映导入内容，按现有方式提交保存
+  await expect(page.getByTestId("preview-difference")).toHaveText("+50.000 g");
+  await expect(page.getByTestId("preview-verdict")).toHaveText("预览裁决：不闭合");
+  await page.getByTestId("submit").click();
+
+  const detail = page.getByTestId("batch-detail");
+  await expect(detail).toBeVisible();
+  await expect(page.getByTestId("detail-verdict")).toHaveText("不闭合");
+  await expect(page.getByTestId("detail-issued-total")).toHaveText("1100.000 g");
+  await expect(page.getByTestId("detail-net")).toHaveText("1050.000 g");
+  await expect(page.getByTestId("detail-difference")).toHaveText("+50.000 g");
+  await expect(page.getByTestId("raw-issued-2-group")).toHaveText(
+    "第 2 笔：12.500 g × 8 桶 = 100.000 g",
+  );
+
+  // 刷新后重新打开详情：与保存时完全一致
+  await page.reload();
+  const row = page.getByRole("row", { name: new RegExp(no) });
+  await row.getByRole("button", { name: "查看可复算详情" }).click();
+  await expect(page.getByTestId("detail-verdict")).toHaveText("不闭合");
+  await expect(page.getByTestId("detail-issued-total")).toHaveText("1100.000 g");
+  await expect(page.getByTestId("detail-difference")).toHaveText("+50.000 g");
+  await expect(page.getByTestId("raw-issued-2-group")).toHaveText(
+    "第 2 笔：12.500 g × 8 桶 = 100.000 g",
+  );
+  await expect(page.getByTestId("raw-returned")).toContainText(
+    "第 1 笔：10.000 g × 5 桶 = 50.000 g",
+  );
+});
+
+test("乱序四分区的文件：各分区行序按文件顺序保留", async ({ page }) => {
+  const no = nextBatchNo();
+  const shuffled = [
+    "分区,重量,单份重量,份数",
+    "成品,100.000,,",
+    "领料,500.000,,",
+    "废料,10.000,,",
+    "领料,600.000,,",
+    "成品,200.000,,",
+    "退料,50.000,,",
+  ].join("\n");
+
+  await uploadCsv(page, "weigh-shuffled.csv", shuffled);
+  await page.getByTestId("import-confirm").click();
+  await page.getByTestId("batch-no").fill(no);
+  await page.getByTestId("submit").click();
+
+  await expect(page.getByTestId("batch-detail")).toBeVisible();
+  // 每个分区内部的行序与文件中出现顺序一致
+  await expect(page.getByTestId("raw-issued")).toContainText("第 1 笔：500.000 g");
+  await expect(page.getByTestId("raw-issued")).toContainText("第 2 笔：600.000 g");
+  await expect(page.getByTestId("raw-product")).toContainText("第 1 笔：100.000 g");
+  await expect(page.getByTestId("raw-product")).toContainText("第 2 笔：200.000 g");
+  await expect(page.getByTestId("raw-scrap")).toContainText("第 1 笔：10.000 g");
+  await expect(page.getByTestId("raw-returned")).toContainText("第 1 笔：50.000 g");
+
+  // 刷新详情后行序不变
+  await page.reload();
+  const row = page.getByRole("row", { name: new RegExp(no) });
+  await row.getByRole("button", { name: "查看可复算详情" }).click();
+  await expect(page.getByTestId("raw-issued")).toContainText("第 1 笔：500.000 g");
+  await expect(page.getByTestId("raw-issued")).toContainText("第 2 笔：600.000 g");
+  await expect(page.getByTestId("raw-product")).toContainText("第 2 笔：200.000 g");
+});
+
+test("非法文件：错误精确指向原始行号、零落库、当前表单与最近详情均不丢失", async ({ page }) => {
+  // 先保存一个合法批次并打开其详情（最近一次核算详情）
+  const savedNo = nextBatchNo();
+  const created = await page.request.post("/api/batches", {
+    data: { batch_no: savedNo, entries: { issued: ["1000.000"], product: ["1005.000"] } },
+  });
+  expect(created.status()).toBe(201);
+
+  await page.goto("/");
+  const savedRow = page.getByRole("row", { name: new RegExp(savedNo) });
+  await savedRow.getByRole("button", { name: "查看可复算详情" }).click();
+  await expect(page.getByTestId("detail-verdict")).toHaveText("闭合");
+
+  // 手工填写内容：预检失败时必须原样保留
+  await page.getByTestId("batch-no").fill("MANUAL-KEEP");
+  await fillRow(page, "领料", 1, "123.456");
+
+  // 导入前的批次列表快照（用于证明零落库）
+  const before = (await (await page.request.get("/api/batches")).json()) as Array<{
+    batch_no: string;
+  }>;
+
+  // 表头第 1 行、空行第 3 行：非法重量在原始文件第 4 行
+  const badCsv = [
+    "分区,重量,单份重量,份数",
+    "领料,1000.000,,",
+    "",
+    "成品,abc,,",
+  ].join("\n");
+  await uploadCsv(page, "weigh-bad.csv", badCsv);
+
+  const error = page.getByTestId("import-error");
+  await expect(error).toBeVisible();
+  await expect(error).toContainText("第 4 行");
+  await expect(error).toContainText("无法识别");
+  await expect(page.getByTestId("import-preview")).toHaveCount(0);
+
+  // 表单与最近一次核算详情均不丢失
+  await expect(page.getByLabel("领料第1笔重量（克）")).toHaveValue("123.456");
+  await expect(page.getByTestId("batch-no")).toHaveValue("MANUAL-KEEP");
+  await expect(page.getByTestId("batch-detail")).toBeVisible();
+  await expect(page.getByTestId("detail-verdict")).toHaveText("闭合");
+
+  // 零落库：批次列表与导入前完全一致
+  const after = (await (await page.request.get("/api/batches")).json()) as Array<{
+    batch_no: string;
+  }>;
+  expect(after).toEqual(before);
+});
+
+test("取消导入：待替换方案被丢弃，手工内容不变", async ({ page }) => {
+  await page.getByTestId("batch-no").fill("MANUAL-1");
+  await fillRow(page, "领料", 1, "123.456");
+  await fillRow(page, "成品", 1, "120.000");
+
+  await uploadCsv(page, "weigh-mixed.csv", MIXED_CSV);
+  await expect(page.getByTestId("import-preview")).toBeVisible();
+
+  await page.getByTestId("import-cancel").click();
+  await expect(page.getByTestId("import-preview")).toHaveCount(0);
+
+  // 手工内容（批次号 + 各分区行）原样保留，本地预览仍按手工内容核算
+  await expect(page.getByTestId("batch-no")).toHaveValue("MANUAL-1");
+  await expect(page.getByLabel("领料第1笔重量（克）")).toHaveValue("123.456");
+  await expect(page.getByLabel("成品第1笔重量（克）")).toHaveValue("120.000");
+  await expect(page.getByTestId("preview-difference")).toHaveText("-3.456 g");
+});
+

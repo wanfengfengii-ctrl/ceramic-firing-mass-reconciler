@@ -49,6 +49,68 @@ header h1 {
   font-size: 1rem;
 }
 
+.import-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 16px;
+  flex-wrap: wrap;
+}
+
+.import-file {
+  display: none;
+}
+
+.btn-import {
+  padding: 8px 16px;
+  border: 1px solid #1a56db;
+  border-radius: 6px;
+  background: #fff;
+  color: #1a56db;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.btn-import:disabled {
+  opacity: 0.6;
+}
+
+.hint-inline {
+  color: #7b8794;
+  font-size: 0.85rem;
+}
+
+.import-preview {
+  margin-bottom: 16px;
+  border-color: #b6c8f5;
+  background: #f8faff;
+}
+
+.import-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.btn-import-confirm {
+  padding: 8px 18px;
+  border: none;
+  border-radius: 6px;
+  background: #1a56db;
+  color: #fff;
+  cursor: pointer;
+}
+
+.btn-import-cancel {
+  padding: 8px 18px;
+  border: 1px solid #cbd2d9;
+  border-radius: 6px;
+  background: #fff;
+  color: #3e4c59;
+  cursor: pointer;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));

@@ -66,6 +66,41 @@ class EntryOut(BaseModel):
     count: int | None = None
 
 
+class ImportPreviewIn(BaseModel):
+    """称重文件预检请求：UTF-8 CSV 文本（分区/重量/单份重量/份数四列）。"""
+
+    model_config = ConfigDict(strict=True)
+
+    # 电子秤导出的明细远远小于 1 MB；超限在入口即拒，避免解析巨型文本
+    content: str = Field(min_length=1, max_length=1_000_000)
+
+
+class ImportReckoning(BaseModel):
+    """导入预检的核算预览：与批次详情相同的十进制字段，不含身份/时间信息。"""
+
+    issued_total: str
+    returned_total: str
+    product_total: str
+    scrap_total: str
+    net_input: str
+    output_total: str
+    difference: str  # 带符号，保留三位小数
+    tolerance: str
+    closed: bool
+    verdict: str  # “闭合” / “不闭合”
+
+
+class ImportPreviewOut(BaseModel):
+    """合法文件的预检结果：规范化行（各分区按文件行序）+ 四分区核算预览。
+
+    纯只读：不落库；用户确认后仍走 POST /api/batches 保存。
+    """
+
+    row_count: int  # 参与导入的数据行数（不含表头与被忽略的空行）
+    entries: dict[str, list[EntryOut]]
+    preview: ImportReckoning
+
+
 class BatchDetail(BaseModel):
     id: int
     batch_no: str

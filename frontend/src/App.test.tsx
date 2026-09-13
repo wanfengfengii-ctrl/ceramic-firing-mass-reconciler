@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import type { BatchCompare, BatchDetail, BatchSummary } from "./api";
+import type {
+  BatchCompare,
+  BatchDetail,
+  BatchSummary,
+  ImportPreviewResponse,
+} from "./api";
 
 const detailClosed: BatchDetail = {
   id: 7,
@@ -524,5 +529,230 @@ describe("App 核算站", () => {
     expect(await screen.findByTestId("compare-result")).toBeInTheDocument();
     expect(screen.queryByTestId("compare-error")).not.toBeInTheDocument();
     expect(compareCalls).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 称重文件导入：预检 → 确认替换 → 现有方式提交；失败/取消不动当前内容
+// ---------------------------------------------------------------------------
+
+describe("称重文件导入", () => {
+  const CSV = [
+    "分区,重量,单份重量,份数",
+    "领料,1000.000,,",
+    "领料,,12.500,8",
+    "退料,,10.000,5",
+    "成品,1040.000,,",
+    "废料,60.000,,",
+  ].join("\n");
+
+  const importResult: ImportPreviewResponse = {
+    row_count: 5,
+    entries: {
+      issued: [
+        { seq: 1, weight: "1000.000", mode: "single" },
+        { seq: 2, weight: "100.000", mode: "group", unit_weight: "12.500", count: 8 },
+      ],
+      returned: [
+        { seq: 1, weight: "50.000", mode: "group", unit_weight: "10.000", count: 5 },
+      ],
+      product: [{ seq: 1, weight: "1040.000", mode: "single" }],
+      scrap: [{ seq: 1, weight: "60.000", mode: "single" }],
+    },
+    preview: {
+      issued_total: "1100.000",
+      returned_total: "50.000",
+      product_total: "1040.000",
+      scrap_total: "60.000",
+      net_input: "1050.000",
+      output_total: "1100.000",
+      difference: "+50.000",
+      tolerance: "5",
+      closed: false,
+      verdict: "不闭合",
+    },
+  };
+
+  const savedDetail: BatchDetail = {
+    id: 11,
+    batch_no: "IMP-11",
+    closed: false,
+    verdict: "不闭合",
+    issued_total: "1100.000",
+    returned_total: "50.000",
+    product_total: "1040.000",
+    scrap_total: "60.000",
+    net_input: "1050.000",
+    output_total: "1100.000",
+    difference: "+50.000",
+    tolerance: "5",
+    entries: {
+      issued: [
+        { seq: 1, weight: "1000.000", mode: "single" },
+        { seq: 2, weight: "100.000", mode: "group", unit_weight: "12.500", count: 8 },
+      ],
+      returned: [
+        { seq: 1, weight: "50.000", mode: "group", unit_weight: "10.000", count: 5 },
+      ],
+      product: [{ seq: 1, weight: "1040.000", mode: "single" }],
+      scrap: [{ seq: 1, weight: "60.000", mode: "single" }],
+    },
+    created_at: "2026-09-13T08:00:00+00:00",
+  };
+
+  const csvFile = (content: string) =>
+    new File([content], "weigh-0913.csv", { type: "text/csv" });
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+      return jsonResponse({ detail: "未预期的请求" }, 500);
+    }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("预检展示规范化行与核算预览，确认后替换录入并保留批次号，再按现有方式提交", async () => {
+    const user = userEvent.setup();
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+        if (url === "/api/batches/import-preview" && method === "POST") {
+          const payload = JSON.parse(init!.body as string);
+          // 上送的是文件 UTF-8 文本
+          expect(payload.content).toBe(CSV);
+          return jsonResponse(importResult);
+        }
+        if (url === "/api/batches" && method === "POST") {
+          const payload = JSON.parse(init!.body as string);
+          // 确认导入后仍通过现有创建接口提交：单笔字符串 + 成组对象
+          expect(payload.batch_no).toBe("IMP-11");
+          expect(payload.entries.issued).toEqual([
+            "1000.000",
+            { mode: "group", unit_weight: "12.500", count: 8 },
+          ]);
+          expect(payload.entries.returned).toEqual([
+            { mode: "group", unit_weight: "10.000", count: 5 },
+          ]);
+          expect(payload.entries.product).toEqual(["1040.000"]);
+          expect(payload.entries.scrap).toEqual(["60.000"]);
+          return jsonResponse(savedDetail, 201);
+        }
+        return jsonResponse({ detail: `未预期 ${url}` }, 500);
+      },
+    );
+
+    render(<App />);
+    // 先手工填写批次号与一笔将被替换的内容
+    await user.type(screen.getByTestId("batch-no"), "IMP-11");
+    await user.type(screen.getByLabelText("成品第1笔重量（克）"), "777");
+
+    await user.upload(screen.getByTestId("import-file"), csvFile(CSV));
+
+    // 预检面板：规范化行（含成组算式）与核算预览
+    const panel = await screen.findByTestId("import-preview");
+    expect(within(panel).getByTestId("import-raw-issued-2-group")).toHaveTextContent(
+      "12.500 g × 8 桶 = 100.000 g",
+    );
+    expect(within(panel).getByTestId("import-preview-difference")).toHaveTextContent(
+      "+50.000 g",
+    );
+    expect(within(panel).getByTestId("import-preview-verdict")).toHaveTextContent(
+      "不闭合",
+    );
+    // 确认前：手工内容原样保留
+    expect(screen.getByLabelText("成品第1笔重量（克）")).toHaveValue("777");
+
+    await user.click(within(panel).getByTestId("import-confirm"));
+
+    // 替换后：批次号保留，四个分区被导入行整体替换
+    expect(screen.getByTestId("batch-no")).toHaveValue("IMP-11");
+    expect(screen.getByLabelText("领料第1笔重量（克）")).toHaveValue("1000.000");
+    expect(screen.getByLabelText("领料第2笔单份重量（克）")).toHaveValue("12.500");
+    expect(screen.getByLabelText("领料第2笔份数")).toHaveValue("8");
+    expect(screen.getByLabelText("成品第1笔重量（克）")).toHaveValue("1040.000");
+    expect(screen.queryByTestId("import-preview")).not.toBeInTheDocument();
+    // 现有本地预览即时反映导入内容
+    expect(screen.getByTestId("preview-difference")).toHaveTextContent("+50.000");
+    expect(screen.getByTestId("preview-verdict")).toHaveTextContent("不闭合");
+
+    await user.click(screen.getByTestId("submit"));
+    const detail = await screen.findByTestId("batch-detail");
+    expect(within(detail).getByTestId("detail-verdict")).toHaveTextContent("不闭合");
+    expect(within(detail).getByTestId("raw-issued-2-group")).toHaveTextContent(
+      "12.500 g × 8 桶 = 100.000 g",
+    );
+  });
+
+  it("预检失败：提示 CSV 行号，当前表单与最近一次核算详情均不丢失", async () => {
+    const user = userEvent.setup();
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([summary]);
+        if (url === "/api/batches/7") return jsonResponse(detailClosed);
+        if (url === "/api/batches/import-preview" && method === "POST") {
+          return jsonResponse(
+            {
+              detail: "第 4 行：成品 第 1 笔：无法识别的重量 'abc'",
+              line: 4,
+              reason: "成品 第 1 笔：无法识别的重量 'abc'",
+            },
+            400,
+          );
+        }
+        return jsonResponse({ detail: `未预期 ${url}` }, 500);
+      },
+    );
+
+    render(<App />);
+    // 打开最近一次核算详情，并手工填写内容
+    const row = await screen.findByTestId("row-7");
+    await user.click(within(row).getByRole("button", { name: "查看可复算详情" }));
+    await screen.findByTestId("batch-detail");
+    await user.type(screen.getByTestId("batch-no"), "KEEP-1");
+    await user.type(screen.getByLabelText("领料第1笔重量（克）"), "123.456");
+
+    const badCsv = ["分区,重量,单份重量,份数", "领料,1000.000,,", "", "成品,abc,,"].join("\n");
+    await user.upload(screen.getByTestId("import-file"), csvFile(badCsv));
+
+    // 错误精确指向原始行号；表单、批次号与详情全部保留
+    const error = await screen.findByTestId("import-error");
+    expect(error).toHaveTextContent("第 4 行");
+    expect(error).toHaveTextContent("无法识别");
+    expect(screen.getByLabelText("领料第1笔重量（克）")).toHaveValue("123.456");
+    expect(screen.getByTestId("batch-no")).toHaveValue("KEEP-1");
+    expect(screen.getByTestId("batch-detail")).toBeInTheDocument();
+    expect(screen.queryByTestId("import-preview")).not.toBeInTheDocument();
+  });
+
+  it("取消替换：待导入方案被丢弃，手工内容不变", async () => {
+    const user = userEvent.setup();
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+        if (url === "/api/batches/import-preview" && method === "POST") {
+          return jsonResponse(importResult);
+        }
+        return jsonResponse({ detail: `未预期 ${url}` }, 500);
+      },
+    );
+
+    render(<App />);
+    await user.type(screen.getByTestId("batch-no"), "KEEP-2");
+    await user.type(screen.getByLabelText("领料第1笔重量（克）"), "123.456");
+
+    await user.upload(screen.getByTestId("import-file"), csvFile(CSV));
+    await screen.findByTestId("import-preview");
+    await user.click(screen.getByTestId("import-cancel"));
+
+    expect(screen.queryByTestId("import-preview")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("领料第1笔重量（克）")).toHaveValue("123.456");
+    expect(screen.getByTestId("batch-no")).toHaveValue("KEEP-2");
   });
 });
