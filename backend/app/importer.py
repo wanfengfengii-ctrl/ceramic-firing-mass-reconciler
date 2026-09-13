@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+from collections.abc import Iterator
 
 from .calc import (
     KINDS,
@@ -68,11 +69,50 @@ def _is_blank(cells: list[str]) -> bool:
     return all(cell.strip() == "" for cell in cells)
 
 
-def _parse_header(reader: csv.reader) -> dict[str, int]:
-    """读取第一个非空行作为表头，返回 列名 → 下标；非法表头整份拒绝。"""
+def _iter_records(reader: csv.reader) -> Iterator[tuple[int, list[str]]]:
+    """逐条产出 (起始物理行号, 记录)。
 
-    for row in reader:
-        line = reader.line_num
+    引号内的换行会让一条逻辑记录跨越多个物理行，此时 csv.reader 只在记录
+    结束时给出 line_num（字段结束行）；错误定位要的是该称重记录开始的原始
+    物理行，因此在每次迭代前记住下一条记录的起始行号。strict 模式下引号
+    未闭合/引号格式损坏会在读出该记录时抛 csv.Error，同样定位到记录起始行。
+    """
+
+    next_start = 1  # reader.line_num 初始为 0，第一条记录从第 1 物理行开始
+    while True:
+        try:
+            row = next(reader)
+        except StopIteration:
+            return
+        except csv.Error as exc:
+            # 引号未闭合（strict：读到文件结束仍在引号内）等格式损坏：
+            # 绝不悄悄吞掉后续记录，按本记录开始的原始物理行整份拒绝
+            raise ImportRejectedError(_csv_error_text(exc), line=next_start) from exc
+        line = next_start
+        # 本记录已读完（line_num 为其结束物理行），下一条紧随其后
+        next_start = reader.line_num + 1
+        yield line, row
+
+
+def _csv_error_text(exc: csv.Error) -> str:
+    """csv 层（英文）错误信息转成面向窑边操作员的中文说明。"""
+
+    message = str(exc)
+    if message == "unexpected end of data":
+        return "CSV 解析失败：引号未闭合，字段在引号内一直延续到文件结束（文件格式损坏）"
+    if "expected after" in message:
+        return "CSV 解析失败：引号字段闭合后存在多余字符（文件格式损坏）"
+    return f"CSV 解析失败：{message}"
+
+
+def _parse_header(records: Iterator[tuple[int, list[str]]]) -> dict[str, int]:
+    """读取第一个非空行作为表头，返回 列名 → 下标；非法表头整份拒绝。
+
+    records 是与调用方共享的同一条记录迭代器：表头之后的物理行仍由调用方
+    接着迭代，行号连续计数。
+    """
+
+    for line, row in records:
         if _is_blank(row):
             continue  # 表头前的空行同样忽略
         seen: dict[str, int] = {}
@@ -159,29 +199,26 @@ def _parse_row(
 def preview_import(content: str) -> ImportPreviewOut:
     """预检一份称重 CSV：返回规范化行与核算预览，不写数据库。"""
 
-    # 电子秤/Excel 导出的 UTF-8 CSV 常带 BOM，先去掉再按文本解析
-    reader = csv.reader(io.StringIO(content.removeprefix("﻿")))
-    try:
-        columns = _parse_header(reader)
+    # 电子秤/Excel 导出的 UTF-8 CSV 常带 BOM，先去掉再按文本解析。
+    # strict=True：引号必须成对、闭合后不得夹带多余字符。宽松模式下未闭合的
+    # 引号会一路吞并到文件结束，使其后的成品等记录静默消失却预检成功；
+    # 格式损坏的文件必须整份拒绝。
+    reader = csv.reader(io.StringIO(content.removeprefix("﻿")), strict=True)
+    records = _iter_records(reader)
+    columns = _parse_header(records)
 
-        prepared: dict[str, list[PreparedEntry]] = {kind: [] for kind in KINDS}
-        row_count = 0
-        for row in reader:
-            if _is_blank(row):
-                continue  # 空行可忽略；reader.line_num 仍按原始物理行计数
-            line = reader.line_num
-            # 缺尾列按空单元格处理；多出的尾列属于额外列，忽略
-            cells = {
-                name: (row[idx].strip() if idx < len(row) else "")
-                for name, idx in columns.items()
-            }
-            row_count += 1
-            _parse_row(cells, line=line, prepared=prepared)
-    except csv.Error as exc:
-        # 兜底：csv 层错误（如字段超过上限）按当前行整份拒绝，绝不变成 500
-        raise ImportRejectedError(
-            f"CSV 解析失败：{exc}", line=reader.line_num or None
-        ) from exc
+    prepared: dict[str, list[PreparedEntry]] = {kind: [] for kind in KINDS}
+    row_count = 0
+    for line, row in records:
+        if _is_blank(row):
+            continue  # 空行可忽略；行号仍按原始物理行计数
+        # 缺尾列按空单元格处理；多出的尾列属于额外列，忽略
+        cells = {
+            name: (row[idx].strip() if idx < len(row) else "")
+            for name, idx in columns.items()
+        }
+        row_count += 1
+        _parse_row(cells, line=line, prepared=prepared)
 
     try:
         result = reckon_prepared(prepared)

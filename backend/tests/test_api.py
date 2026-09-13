@@ -788,6 +788,55 @@ async def test_import_rejection_points_to_original_line_and_writes_nothing(
     assert client_fixture.get("/api/batches").json() == []
 
 
+async def test_import_corrupt_csv_rejected_with_record_start_line(
+    client_fixture, clean
+) -> None:
+    from app.db import engine
+
+    # 1) 附加备注引号未闭合且其后还有成品称重：宽松解析曾吞掉成品记录却预检成功。
+    #    strict 解析必须整份拒绝，行号指向引号开始的第 2 行。
+    unclosed = (
+        "分区,重量,单份重量,份数,备注\n"
+        '领料,1000.000,,,"坏备注\n'
+        "成品,500.000,,,\n"
+        "废料,10.000,,,\n"
+    )
+    resp = client_fixture.post(IMPORT_URL, json={"content": unclosed})
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["line"] == 2
+    assert "引号" in body["reason"]
+
+    # 2) 领料重量字段跨行且拼接非法：行号必须是记录开始的第 2 行，不是字段结束的第 3 行
+    multiline = (
+        "分区,重量,单份重量,份数\n"
+        '领料,"10\n0x",,\n'
+        "成品,100.000,,\n"
+    )
+    resp = client_fixture.post(IMPORT_URL, json={"content": multiline})
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["line"] == 2
+    assert "领料 第 1 笔" in body["reason"]
+
+    # 3) 合法的跨行引号字段（引号成对）仍可正常预检，行号按物理行连续
+    legal = (
+        "分区,重量,单份重量,份数,备注\n"
+        '领料,1000.000,,,"多行\n备注"\n'
+        "成品,1000.000,,,\n"
+    )
+    resp = client_fixture.post(IMPORT_URL, json={"content": legal})
+    assert resp.status_code == 200, resp.text
+    d = resp.json()
+    assert [e["weight"] for e in d["entries"]["product"]] == ["1000.000"]
+
+    # 拒绝路径零落库
+    async with AsyncSession(engine) as s:
+        n_batches = (await s.execute(text("SELECT count(*) FROM batches"))).scalar_one()
+    assert n_batches == 0
+    assert client_fixture.get("/api/batches").json() == []
+
+
 async def test_import_preview_accepts_bom_blank_lines_and_extra_columns(
     client_fixture, clean
 ) -> None:

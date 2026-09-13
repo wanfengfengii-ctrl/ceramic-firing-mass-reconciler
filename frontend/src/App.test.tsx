@@ -730,6 +730,69 @@ describe("称重文件导入", () => {
     expect(screen.queryByTestId("import-preview")).not.toBeInTheDocument();
   });
 
+  it("文件含非法 UTF-8 字节：浏览器侧整份拒绝且不发预检请求，当前表单保留", async () => {
+    const user = userEvent.setup();
+    let previewRequested = false;
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+        if (url === "/api/batches/import-preview" && method === "POST") {
+          previewRequested = true;
+          return jsonResponse(importResult);
+        }
+        return jsonResponse({ detail: `未预期 ${url}` }, 500);
+      },
+    );
+
+    render(<App />);
+    await user.type(screen.getByTestId("batch-no"), "UTF8-KEEP");
+    await user.type(screen.getByLabelText("领料第1笔重量（克）"), "123.456");
+
+    // 合法表头 + 数据行，附加备注列末尾是非法 UTF-8 字节序列（0xC3 0x28）：
+    // Blob.text()/readAsText 会静默替换成 U+FFFD 后照常预检，严格解码必须拒绝
+    const prefix = new TextEncoder().encode(
+      ["分区,重量,单份重量,份数,备注", "领料,1000.000,,,,坏字节"].join("\n"),
+    );
+    const bytes = new Uint8Array(prefix.length + 2);
+    bytes.set(prefix, 0);
+    bytes[prefix.length] = 0xc3;
+    bytes[prefix.length + 1] = 0x28;
+    const badFile = new File([bytes], "weigh-bad-utf8.csv", { type: "text/csv" });
+    await user.upload(screen.getByTestId("import-file"), badFile);
+
+    const error = await screen.findByTestId("import-error");
+    expect(error).toHaveTextContent("UTF-8");
+    expect(error).not.toHaveTextContent("请重试");
+    expect(screen.queryByTestId("import-preview")).not.toBeInTheDocument();
+    // 未调用预检接口：静默替换后的文本不可能被服务端接受而落库
+    expect(previewRequested).toBe(false);
+    // 当前表单与批次号原样保留
+    expect(screen.getByLabelText("领料第1笔重量（克）")).toHaveValue("123.456");
+    expect(screen.getByTestId("batch-no")).toHaveValue("UTF8-KEEP");
+  });
+
+  it("合法 BOM 的 UTF-8 文件正常预检（BOM 不被当作编码错误）", async () => {
+    const user = userEvent.setup();
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+        if (url === "/api/batches/import-preview" && method === "POST") {
+          const payload = JSON.parse(init!.body as string);
+          expect(payload.content.startsWith("﻿")).toBe(false);
+          return jsonResponse(importResult);
+        }
+        return jsonResponse({ detail: `未预期 ${url}` }, 500);
+      },
+    );
+
+    render(<App />);
+    const bomFile = new File(["﻿" + CSV], "weigh-bom.csv", { type: "text/csv" });
+    await user.upload(screen.getByTestId("import-file"), bomFile);
+    expect(await screen.findByTestId("import-preview")).toBeInTheDocument();
+  });
+
   it("取消替换：待导入方案被丢弃，手工内容不变", async () => {
     const user = userEvent.setup();
     (fetch as ReturnType<typeof vi.fn>).mockImplementation(

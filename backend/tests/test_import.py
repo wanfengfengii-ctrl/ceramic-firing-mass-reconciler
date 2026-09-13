@@ -210,6 +210,58 @@ def test_group_product_is_decimal_not_float() -> None:
     assert out.preview.difference == "+0.000"
 
 
+def test_unclosed_quote_swallowing_later_rows_rejected_whole_file() -> None:
+    # 回归：附加备注列的引号未闭合时，宽松解析会把后续成品/废料行吞并到备注
+    # 字段里，预检“成功”但成品记录静默消失。格式损坏的文件必须整份拒绝，
+    # 并指出引号开始的那条记录（第 2 行）。
+    text = (
+        "分区,重量,单份重量,份数,备注\n"
+        '领料,1000.000,,,"坏备注未闭合\n'
+        "成品,500.000,,,\n"
+        "废料,10.000,,,\n"
+    )
+    with pytest.raises(ImportRejectedError) as info:
+        preview_import(text)
+    assert info.value.line == 2
+    assert "引号" in info.value.reason
+    assert str(info.value).startswith("第 2 行：")
+
+
+def test_quote_garbage_after_close_rejected() -> None:
+    # 引号闭合后紧跟多余字符：同样属于引号格式损坏，整份拒绝
+    with pytest.raises(ImportRejectedError) as info:
+        preview_import(csv_text('领料,1000.000,,,"ok"坏'))
+    assert info.value.line == 2
+    assert "引号" in info.value.reason
+
+
+def test_multiline_illegal_field_points_to_record_start_line() -> None:
+    # 回归：领料重量字段被引号包裹跨越第 2–3 物理行，拼接结果 "10\n0x" 非法。
+    # 页面收到的行号必须是该称重记录开始的原始行（2），而非字段结束行（3）。
+    text = (
+        "分区,重量,单份重量,份数\n"
+        '领料,"10\n'
+        '0x",,\n'
+        "成品,100.000,,\n"
+    )
+    with pytest.raises(ImportRejectedError) as info:
+        preview_import(text)
+    assert info.value.line == 2
+    assert "领料 第 1 笔" in info.value.reason
+
+
+def test_legal_multiline_quoted_field_still_accepted_with_start_line() -> None:
+    # 合法的跨行引号字段仍可解析（RFC 4180）；其后记录行号按物理行连续
+    text = (
+        "分区,重量,单份重量,份数,备注\n"
+        '领料,1000.000,,,"多行\n备注"\n'
+        "成品,1000.000,,,\n"
+    )
+    out = preview_import(text)
+    assert [e.weight for e in out.entries["issued"]] == ["1000.000"]
+    assert [e.weight for e in out.entries["product"]] == ["1000.000"]
+
+
 def test_overlong_weight_cell_rejected_with_line_not_crash() -> None:
     # 回归：约 1 MB 的超长重量曾触发 csv 模块 128 KiB 字段上限，
     # _csv.Error 未被捕获导致 500；现在应指出第 2 行重量非法

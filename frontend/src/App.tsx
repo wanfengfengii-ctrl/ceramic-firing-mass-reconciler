@@ -40,15 +40,34 @@ interface PendingImport extends ImportPreviewResponse {
   filename: string;
 }
 
-/** 读取文件 UTF-8 文本：优先 Blob.text()，老环境回退 FileReader。 */
-function readFileText(file: File): Promise<string> {
-  if (typeof file.text === "function") return file.text();
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error ?? new Error("读取文件失败"));
-    reader.readAsText(file, "utf-8");
-  });
+/** 文件不是有效 UTF-8（含非法字节）：不经预检、整份拒绝，避免浏览器静默替换字节。 */
+class FileEncodingError extends Error {}
+
+/**
+ * 读取文件原始字节并按 UTF-8 严格解码：fatal 模式下遇到非法字节立即失败。
+ * Blob.text()/readAsText 会把非法字节静默替换成 U+FFFD，损坏的文件反而能
+ * 通过预检——电子秤文件要求 UTF-8，编码无效时必须在浏览器侧就整份拒绝。
+ * BOM（合法 UTF-8）由 TextDecoder 自动剥离，与后端处理一致。
+ * 优先 Blob.arrayBuffer()，老环境回退 FileReader.readAsArrayBuffer。
+ */
+async function readFileTextUtf8(file: File): Promise<string> {
+  const bytes =
+    typeof file.arrayBuffer === "function"
+      ? await file.arrayBuffer()
+      : await new Promise<ArrayBuffer>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as ArrayBuffer);
+          reader.onerror = () => reject(reader.error ?? new Error("读取文件失败"));
+          reader.readAsArrayBuffer(file);
+        });
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  try {
+    return decoder.decode(bytes, { stream: false });
+  } catch {
+    throw new FileEncodingError(
+      "文件不是有效的 UTF-8 编码（含非法字节），整份拒绝：请用电子秤重新导出为 UTF-8 CSV 后再导入",
+    );
+  }
 }
 
 export default function App() {
@@ -101,14 +120,17 @@ export default function App() {
     setPendingImport(null);
     setImporting(true);
     try {
-      const content = await readFileText(file);
+      const content = await readFileTextUtf8(file);
       const result = await api.importPreview(content);
       setPendingImport({ ...result, filename: file.name });
     } catch (e) {
-      // 预检失败只提示行号与原因：当前表单、批次号与最近一次核算详情都不丢失
-      setImportError(
-        e instanceof ApiError ? `导入预检失败：${e.message}` : "导入预检失败，请重试",
-      );
+      // 预检失败只提示原因（后端给出 CSV 行号；编码无效在浏览器侧整份拒绝、
+      // 不发预检请求）：当前表单、批次号与最近一次核算详情都不丢失
+      if (e instanceof FileEncodingError || e instanceof ApiError) {
+        setImportError(`导入预检失败：${e.message}`);
+      } else {
+        setImportError("导入预检失败，请重试");
+      }
     } finally {
       setImporting(false);
       // 允许再次选择同一文件（change 事件需要值变化才触发）

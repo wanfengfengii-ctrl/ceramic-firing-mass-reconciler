@@ -612,6 +612,100 @@ test("取消导入：待替换方案被丢弃，手工内容不变", async ({ pa
   await expect(page.getByTestId("preview-difference")).toHaveText("-3.456 g");
 });
 
+test("备注列引号未闭合且其后还有成品称重：整份拒绝并指向引号开始行", async ({ page }) => {
+  // 回归：宽松解析时未闭合引号会吞并后续成品/废料行，预检“成功”但成品记录消失。
+  // strict 解析必须整份拒绝，行号指向引号开始的第 2 行。
+  const csv = [
+    "分区,重量,单份重量,份数,备注",
+    '领料,1000.000,,,"坏备注未闭合',
+    "成品,500.000,,,",
+    "废料,10.000,,,",
+  ].join("\n");
+
+  const before = (await (await page.request.get("/api/batches")).json()) as unknown[];
+  await uploadCsv(page, "weigh-unclosed.csv", csv);
+
+  const error = page.getByTestId("import-error");
+  await expect(error).toBeVisible();
+  await expect(error).toContainText("第 2 行");
+  await expect(error).toContainText("引号");
+  await expect(page.getByTestId("import-preview")).toHaveCount(0);
+
+  // 零落库
+  const after = (await (await page.request.get("/api/batches")).json()) as unknown[];
+  expect(after).toEqual(before);
+});
+
+test("重量字段跨行且拼接非法：错误标出该称重记录开始的原始行", async ({ page }) => {
+  // 领料重量被引号包裹跨越第 2–3 物理行，拼接结果 "10\n0x" 非法；
+  // 页面收到的行号必须是记录开始的第 2 行，而非字段结束的第 3 行
+  const csv = ['分区,重量,单份重量,份数', '领料,"10', '0x",,', "成品,100.000,,"].join(
+    "\n",
+  );
+
+  await uploadCsv(page, "weigh-multiline.csv", csv);
+
+  const error = page.getByTestId("import-error");
+  await expect(error).toBeVisible();
+  await expect(error).toContainText("第 2 行");
+  await expect(page.getByTestId("import-preview")).toHaveCount(0);
+});
+
+test("合法跨行引号字段仍可导入，后续成品行不丢失", async ({ page }) => {
+  // 引号成对的跨行备注是合法 CSV：成品行必须保留，行号按物理行连续
+  const no = nextBatchNo();
+  const csv = [
+    "分区,重量,单份重量,份数,备注",
+    '领料,1000.000,,,"多行',
+    '备注"',
+    "成品,1000.000,,,",
+  ].join("\n");
+
+  await uploadCsv(page, "weigh-multiline-ok.csv", csv);
+  const preview = page.getByTestId("import-preview");
+  await expect(preview).toBeVisible();
+  await expect(page.getByTestId("import-raw-product")).toContainText("第 1 笔：1000.000 g");
+
+  await page.getByTestId("import-confirm").click();
+  await page.getByTestId("batch-no").fill(no);
+  await page.getByTestId("submit").click();
+  await expect(page.getByTestId("batch-detail")).toBeVisible();
+  await expect(page.getByTestId("detail-verdict")).toHaveText("闭合");
+});
+
+test("文件含非法 UTF-8 字节：浏览器侧识别编码无效并整份拒绝，不发预检请求", async ({ page }) => {
+  // 附加列含非法 UTF-8 字节（0xC3 后直接 ASCII 0x28）：
+  // Blob.text()/readAsText 会静默替换成 U+FFFD 后照常通过预检；
+  // 严格解码必须在浏览器侧整份拒绝
+  const validPrefix = Buffer.from(
+    ["分区,重量,单份重量,份数,备注", "领料,1000.000,,,,坏字节"].join("\n"),
+    "utf-8",
+  );
+  const bytes = Buffer.concat([validPrefix, Buffer.from([0xc3, 0x28])]);
+
+  let previewRequested = false;
+  await page.route("**/api/batches/import-preview", async (route) => {
+    previewRequested = true;
+    await route.continue();
+  });
+
+  const before = (await (await page.request.get("/api/batches")).json()) as unknown[];
+  await page.getByTestId("import-file").setInputFiles({
+    name: "weigh-bad-utf8.csv",
+    mimeType: "text/csv",
+    buffer: bytes,
+  });
+
+  const error = page.getByTestId("import-error");
+  await expect(error).toBeVisible();
+  await expect(error).toContainText("UTF-8");
+  await expect(page.getByTestId("import-preview")).toHaveCount(0);
+  expect(previewRequested).toBe(false);
+
+  const after = (await (await page.request.get("/api/batches")).json()) as unknown[];
+  expect(after).toEqual(before);
+});
+
 test("第 2 行含超长重量的文件：页面指出该行重量非法，而非笼统重试", async ({ page }) => {
   // 回归：约 1 MB 的超长重量曾让后端 500，页面只显示“请求失败/请重试”
   const longWeight = "9".repeat(999_900);
