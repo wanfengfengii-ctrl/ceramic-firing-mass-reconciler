@@ -60,6 +60,33 @@ describe("parseGrams", () => {
     expect(ok.ok && ok.mg).toBe(1n);
     expect(parseGrams("1e-4")).toMatchObject({ ok: false, error: "最多三位小数" });
   });
+
+  it("超大正指数立即拒绝且不卡死（回归：1e999999999 曾导致逐次乘 10 死循环）", () => {
+    const start = performance.now();
+    const r = parseGrams("1e999999999");
+    const elapsed = performance.now() - start;
+    expect(r).toMatchObject({ ok: false, error: "数量级超出存储范围" });
+    expect(elapsed).toBeLessThan(100);
+  });
+
+  it("超长指数串（Number 会变 Infinity）安全拒绝，不抛异常", () => {
+    expect(() => parseGrams("1e" + "9".repeat(20))).not.toThrow();
+    expect(parseGrams("1e" + "9".repeat(20))).toMatchObject({
+      ok: false,
+      error: "数量级超出存储范围",
+    });
+    // 极大负指数按小数位过多拒绝
+    expect(parseGrams("1e-" + "9".repeat(20))).toMatchObject({
+      ok: false,
+      error: "最多三位小数",
+    });
+  });
+
+  it("4 位指数但数值越界仍拒绝，合法 1e10 不被误伤", () => {
+    expect(parseGrams("1e9999")).toMatchObject({ ok: false });
+    const big = parseGrams("1e10"); // 10_000_000_000 g 在 Numeric(14,3) 内
+    expect(big.ok && big.mg).toBe(10_000_000_000_000n);
+  });
 });
 
 describe("formatGrams", () => {
@@ -222,6 +249,20 @@ describe("validateRows", () => {
     expect(r).toMatchObject({ ok: false });
     if (!r.ok) {
       expect(r.error).toBe("领料 第 2 笔：份数必须在 2 与 999 之间");
+      expect(r.focus).toEqual({ kind: "issued", seq: 1 });
+    }
+  });
+
+  it("成组单份为超大指数时立即定位该行并提示非法，不进入乘法循环", () => {
+    const rows = empty();
+    rows.issued = [single("100"), group("1e999999999", "8")];
+    const start = performance.now();
+    const r = validateRows(rows);
+    const elapsed = performance.now() - start;
+    expect(r).toMatchObject({ ok: false });
+    expect(elapsed).toBeLessThan(100);
+    if (!r.ok) {
+      expect(r.error).toBe("领料 第 2 笔：单份重量数量级超出存储范围");
       expect(r.focus).toEqual({ kind: "issued", seq: 1 });
     }
   });

@@ -49,6 +49,12 @@ export const MAX_STORED_GRAMS = "99999999999.999";
 const DECIMAL_RE =
   /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
+// 毫克结果最多 14 位（上限 99_999_999_999_999 mg）；留出少量余量后仍远小于此即非法
+const MAX_MG_DIGITS = String(MAX_STORED_MG).length; // 14
+const MG_DIGITS_GUARD = MAX_MG_DIGITS + 4;          // 18
+// 合法克重的 10 进制指数极小；乘到毫克的放大次数超过该值必为超大数
+const MAX_POWER_TO_MG = 32;
+
 /** 把十进制克重文本解析为毫克整数：必须大于零、小数位不超过三位。 */
 export function parseGrams(raw: string): Parsed {
   const text = raw.trim();
@@ -63,10 +69,22 @@ export function parseGrams(raw: string): Parsed {
     body = body.slice(1);
   }
 
+  // 指数按字符串安全解析：不能直接 Number() —— 超长指数串（如 1e99999999999…）
+  // 会得到 Infinity，随后 BigInt(Infinity) 直接抛错。
   let exp = 0;
   const eIndex = body.search(/[eE]/);
   if (eIndex >= 0) {
-    exp = Number(body.slice(eIndex + 1));
+    const expText = body.slice(eIndex + 1);
+    const expNegative = expText[0] === "-";
+    const expDigits =
+      expText[0] === "+" || expNegative ? expText.slice(1) : expText;
+    // 指数绝对值达到 5 位（≥10000）时，无论极大极小都不可能落在合法克重范围
+    if (expDigits.length > 4) {
+      return expNegative
+        ? { ok: false, error: "最多三位小数" }
+        : { ok: false, error: "数量级超出存储范围" };
+    }
+    exp = (expNegative ? -1 : 1) * Number(expDigits); // ≤9999，精确整数
     body = body.slice(0, eIndex);
   }
 
@@ -77,13 +95,24 @@ export function parseGrams(raw: string): Parsed {
 
   // 最后一位数字相对小数点的指数 = exp - 小数位数；
   // 换算到毫克（10^-3）后必须仍是整数，否则小数位超过三位。
-  const powerToMg = BigInt(exp - fracPart.length + 3);
-  if (powerToMg < 0n) {
+  const powerToMg = exp - fracPart.length + 3;
+  if (powerToMg < 0) {
     return { ok: false, error: "最多三位小数" };
+  }
+  // 绝不能按 powerToMg 逐次乘 10 —— 1e999999999 之类输入会让循环执行约 10 亿次，
+  // 把页面卡死。放大次数越界即非法，立即返回。
+  if (powerToMg > MAX_POWER_TO_MG) {
+    return { ok: false, error: "数量级超出存储范围" };
+  }
+  // 再按字符串位数拦一道超长尾数（如粘贴上亿个 9），避免对巨串做 BigInt()；
+  // 毫克结果位数 = 有效数字位数 + 放大次数。
+  if (digits.length + powerToMg > MG_DIGITS_GUARD) {
+    return { ok: false, error: "数量级超出存储范围" };
   }
 
   let mg = BigInt(digits || "0");
-  for (let i = 0n; i < powerToMg; i++) mg *= 10n;
+  // 此时 powerToMg ≤ 32，乘法次数恒定且极少
+  for (let p = 0; p < powerToMg; p++) mg *= 10n;
   if (negative) mg = -mg;
   if (mg <= 0n) return { ok: false, error: "必须大于零" };
   return { ok: true, mg };

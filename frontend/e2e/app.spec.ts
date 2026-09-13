@@ -253,3 +253,30 @@ test("乘积刚好达到精度边界：前后端十进制结果相同（33333333
     "第 1 笔：33333333333.333 g × 3 桶 = 99999999999.999 g",
   );
 });
+
+test("成组单份指数极大时页面不卡死：立即在该行提示重量非法并可继续操作", async ({ page }) => {
+  const no = nextBatchNo();
+  await page.getByTestId("batch-no").fill(no);
+  await fillRow(page, "领料", 1, "1000.000");
+  await switchRowToGroup(page, "成品", 1);
+
+  // 超大指数（旧实现会进入约 10 亿次 BigInt 乘法把页面卡死）
+  const unit = page.getByLabel("成品第1笔单份重量（克）");
+  await unit.fill("1e999999999");
+
+  // 行内立即提示，小计保持不可核算，预览定位到该分区该行
+  await expect(page.getByTestId("adopted-product-0")).toContainText("数量级超出存储范围");
+  await expect(page.getByTestId("subtotal-product")).toHaveText("小计：—");
+  await expect(page.locator(".panel-result .invalid")).toContainText("成品 第 1 笔");
+
+  // 超长指数串（Number() 会得到 Infinity）同样立即拒绝
+  await unit.fill("1e" + "9".repeat(20));
+  await expect(page.getByTestId("adopted-product-0")).toContainText("数量级超出存储范围");
+
+  // 页面仍然响应：改回合法值后即时恢复乘积与预览
+  await unit.fill("12.500");
+  await page.getByLabel("成品第1笔份数").fill("8");
+  await expect(page.getByTestId("adopted-product-0")).toHaveText("= 100.000 g");
+  await expect(page.getByTestId("subtotal-product")).toHaveText("小计：100.000 g");
+  await expect(page.getByTestId("preview-verdict")).toHaveText("预览裁决：不闭合");
+});
