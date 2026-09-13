@@ -66,13 +66,16 @@ class EntryOut(BaseModel):
     count: int | None = None
 
 
+# 称重文件大小上限（字符）：电子秤明细远远小于 1 MB，超限在入口即拒
+MAX_IMPORT_CONTENT_LENGTH = 1_000_000
+
+
 class ImportPreviewIn(BaseModel):
     """称重文件预检请求：UTF-8 CSV 文本（分区/重量/单份重量/份数四列）。"""
 
     model_config = ConfigDict(strict=True)
 
-    # 电子秤导出的明细远远小于 1 MB；超限在入口即拒，避免解析巨型文本
-    content: str = Field(min_length=1, max_length=1_000_000)
+    content: str = Field(min_length=1, max_length=MAX_IMPORT_CONTENT_LENGTH)
 
 
 class ImportReckoning(BaseModel):

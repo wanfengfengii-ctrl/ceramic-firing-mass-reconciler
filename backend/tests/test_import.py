@@ -208,3 +208,38 @@ def test_group_product_is_decimal_not_float() -> None:
     assert out.entries["scrap"][0].weight == "0.003"
     assert out.preview.scrap_total == "0.003"
     assert out.preview.difference == "+0.000"
+
+
+def test_overlong_weight_cell_rejected_with_line_not_crash() -> None:
+    # 回归：约 1 MB 的超长重量曾触发 csv 模块 128 KiB 字段上限，
+    # _csv.Error 未被捕获导致 500；现在应指出第 2 行重量非法
+    with pytest.raises(ImportRejectedError) as info:
+        preview_import(csv_text("领料," + "9" * 999_900 + ",,", "成品,1,,"))
+    assert info.value.line == 2
+    assert "领料 第 1 笔" in info.value.reason
+    assert "存储范围" in info.value.reason
+
+
+def test_overlong_fraction_weight_rejected_with_line() -> None:
+    # 超长小数部分：超过三位小数，同样按行拒绝
+    with pytest.raises(ImportRejectedError) as info:
+        preview_import(csv_text("领料,0." + "9" * 200_000 + ",,"))
+    assert info.value.line == 2
+    assert "最多三位小数" in info.value.reason
+
+
+def test_overlong_count_rejected_with_line_not_crash() -> None:
+    # 回归：超长份数曾让 int() 触发 Python 整数位数限制（ValueError 变 500）
+    with pytest.raises(ImportRejectedError) as info:
+        preview_import(csv_text("领料,,12.500," + "9" * 5000))
+    assert info.value.line == 2
+    assert "份数" in info.value.reason
+
+
+def test_unparseable_overlong_input_echo_is_truncated() -> None:
+    # 超长非法输入不得原样回显：错误消息保持有界，响应不会变成另一个巨型文件
+    with pytest.raises(ImportRejectedError) as info:
+        preview_import(csv_text("领料," + "9" * 1000 + "x,,"))
+    assert info.value.line == 2
+    assert "无法识别" in info.value.reason
+    assert len(info.value.reason) < 200

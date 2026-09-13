@@ -612,3 +612,31 @@ test("取消导入：待替换方案被丢弃，手工内容不变", async ({ pa
   await expect(page.getByTestId("preview-difference")).toHaveText("-3.456 g");
 });
 
+test("第 2 行含超长重量的文件：页面指出该行重量非法，而非笼统重试", async ({ page }) => {
+  // 回归：约 1 MB 的超长重量曾让后端 500，页面只显示“请求失败/请重试”
+  const longWeight = "9".repeat(999_900);
+  const csv = [
+    "分区,重量,单份重量,份数",
+    `领料,${longWeight},,`,
+    "成品,1,,",
+  ].join("\n");
+
+  // 手工内容在预检失败时必须保留
+  await fillRow(page, "领料", 1, "123.456");
+  // 零落库：导入前后批次列表完全一致
+  const before = (await (await page.request.get("/api/batches")).json()) as unknown[];
+  await uploadCsv(page, "weigh-long.csv", csv);
+
+  const error = page.getByTestId("import-error");
+  await expect(error).toBeVisible();
+  await expect(error).toContainText("第 2 行");
+  await expect(error).toContainText("重量");
+  await expect(error).not.toContainText("请重试");
+  await expect(error).not.toContainText("500");
+  await expect(page.getByTestId("import-preview")).toHaveCount(0);
+  await expect(page.getByLabel("领料第1笔重量（克）")).toHaveValue("123.456");
+
+  const after = (await (await page.request.get("/api/batches")).json()) as unknown[];
+  expect(after).toEqual(before);
+});
+

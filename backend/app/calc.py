@@ -44,6 +44,13 @@ class WeightValidationError(ValueError):
     """单笔重量或整批输入不合法。"""
 
 
+def short_repr(value: object, limit: int = 80) -> str:
+    """错误消息里的输入回显：截断超长文本，避免把巨型输入原样塞进响应。"""
+
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 @dataclass(frozen=True)
 class Reckoning:
     """一次核算的完整结果（单位均为克）。"""
@@ -92,7 +99,7 @@ def parse_weight(raw: object, *, kind: str, seq: int, noun: str = "重量") -> D
         value = Decimal(text)
     except Exception as exc:  # InvalidOperation 等
         raise WeightValidationError(
-            f"{label}：无法识别的{noun} {raw!r}"
+            f"{label}：无法识别的{noun} {short_repr(raw)}"
         ) from exc
 
     if not value.is_finite():

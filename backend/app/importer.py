@@ -28,8 +28,20 @@ from .calc import (
     WeightValidationError,
     prepare_entry,
     reckon_prepared,
+    short_repr,
 )
-from .schemas import EntryOut, ImportPreviewOut, ImportReckoning, q3
+from .schemas import (
+    MAX_IMPORT_CONTENT_LENGTH,
+    EntryOut,
+    ImportPreviewOut,
+    ImportReckoning,
+    q3,
+)
+
+# csv 模块默认字段上限仅 128 KiB，小于文件大小上限：超长单元格（如误粘贴的
+# 超长重量）会在迭代时抛 _csv.Error 变成 500。把上限抬到内容上限之上，让超长
+# 字段正常进入十进制校验，按“重量非法”整份拒绝并给出原始行号。
+csv.field_size_limit(MAX_IMPORT_CONTENT_LENGTH + 1024)
 
 REQUIRED_HEADERS: tuple[str, ...] = ("分区", "重量", "单份重量", "份数")
 
@@ -89,7 +101,7 @@ def _parse_row(
     if kind is None:
         allowed = "、".join(KIND_LABELS[k] for k in KINDS)
         raise ImportRejectedError(
-            f"未知分区 {kind_text!r}（应为 {allowed}）", line=line
+            f"未知分区 {short_repr(kind_text)}（应为 {allowed}）", line=line
         )
 
     # 行号按分区内已有行数递增，与保存后详情里的“第 n 笔”一致
@@ -111,6 +123,12 @@ def _parse_row(
             if not _COUNT_RE.fullmatch(count_text):
                 raise WeightValidationError(
                     f"{label}：份数必须是 {MIN_GROUP_COUNT}–{MAX_GROUP_COUNT} 的整数"
+                )
+            # 份数上限 999（最多三位）：更长的数字串必然越界。在此拦截可避免
+            # int() 触发 Python 的整数位数限制（ValueError），保证错误仍是 400
+            if len(count_text) > len(str(MAX_GROUP_COUNT)):
+                raise WeightValidationError(
+                    f"{label}：份数必须在 {MIN_GROUP_COUNT} 与 {MAX_GROUP_COUNT} 之间"
                 )
             entry = prepare_entry(
                 {
@@ -143,21 +161,27 @@ def preview_import(content: str) -> ImportPreviewOut:
 
     # 电子秤/Excel 导出的 UTF-8 CSV 常带 BOM，先去掉再按文本解析
     reader = csv.reader(io.StringIO(content.removeprefix("﻿")))
-    columns = _parse_header(reader)
+    try:
+        columns = _parse_header(reader)
 
-    prepared: dict[str, list[PreparedEntry]] = {kind: [] for kind in KINDS}
-    row_count = 0
-    for row in reader:
-        if _is_blank(row):
-            continue  # 空行可忽略；reader.line_num 仍按原始物理行计数
-        line = reader.line_num
-        # 缺尾列按空单元格处理；多出的尾列属于额外列，忽略
-        cells = {
-            name: (row[idx].strip() if idx < len(row) else "")
-            for name, idx in columns.items()
-        }
-        row_count += 1
-        _parse_row(cells, line=line, prepared=prepared)
+        prepared: dict[str, list[PreparedEntry]] = {kind: [] for kind in KINDS}
+        row_count = 0
+        for row in reader:
+            if _is_blank(row):
+                continue  # 空行可忽略；reader.line_num 仍按原始物理行计数
+            line = reader.line_num
+            # 缺尾列按空单元格处理；多出的尾列属于额外列，忽略
+            cells = {
+                name: (row[idx].strip() if idx < len(row) else "")
+                for name, idx in columns.items()
+            }
+            row_count += 1
+            _parse_row(cells, line=line, prepared=prepared)
+    except csv.Error as exc:
+        # 兜底：csv 层错误（如字段超过上限）按当前行整份拒绝，绝不变成 500
+        raise ImportRejectedError(
+            f"CSV 解析失败：{exc}", line=reader.line_num or None
+        ) from exc
 
     try:
         result = reckon_prepared(prepared)

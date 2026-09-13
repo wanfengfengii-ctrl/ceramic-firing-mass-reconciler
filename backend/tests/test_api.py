@@ -806,3 +806,37 @@ async def test_import_preview_accepts_bom_blank_lines_and_extra_columns(
     assert d["row_count"] == 2
     assert d["preview"]["difference"] == "+5.000"
     assert d["preview"]["verdict"] == "闭合"
+
+
+async def test_import_overlong_weight_rejected_with_line_not_500(
+    client_fixture, clean
+) -> None:
+    # 回归：约 1 MB 的超长重量曾越过 csv 模块字段上限变成 500（页面只报重试）；
+    # 现在必须 400 并精确指出第 2 行重量非法，且零落库
+    resp = client_fixture.post(
+        IMPORT_URL,
+        json=import_csv("领料," + "9" * 999_900 + ",,", "成品,1,,"),
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["line"] == 2
+    assert "存储范围" in body["reason"]
+    assert body["detail"].startswith("第 2 行：")
+
+    # 超长份数同样按行拒绝（曾触发 int() 位数限制变 500）
+    resp = client_fixture.post(
+        IMPORT_URL, json=import_csv("领料,,12.500," + "9" * 5000)
+    )
+    assert resp.status_code == 400
+    assert resp.json()["line"] == 2
+    assert "份数" in resp.json()["reason"]
+
+    from app.db import engine
+
+    async with AsyncSession(engine) as s:
+        n_batches = (await s.execute(text("SELECT count(*) FROM batches"))).scalar_one()
+        n_entries = (
+            await s.execute(text("SELECT count(*) FROM weight_entries"))
+        ).scalar_one()
+    assert n_batches == 0
+    assert n_entries == 0
