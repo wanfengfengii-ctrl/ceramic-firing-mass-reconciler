@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -415,3 +416,200 @@ async def test_group_rows_do_not_create_per_copy_rows(client_fixture, clean) -> 
             await s.execute(text("SELECT count(*) FROM weight_entries"))
         ).scalar_one()
     assert n == 2
+
+
+# ---------------------------------------------------------------------------
+# 批次对比：并排核对两个已保存批次的核算快照（带符号差值，只读）
+# ---------------------------------------------------------------------------
+
+METRIC_KEYS = (
+    "issued_total",
+    "returned_total",
+    "net_input",
+    "product_total",
+    "scrap_total",
+    "output_total",
+    "difference",
+    "tolerance",
+)
+
+
+def _negate(signed: str) -> str:
+    # "+12.000" ↔ "-12.000" 严格互换；零的相反数仍是零，规范渲染为 "+0.000"
+    assert signed[0] in "+-"
+    if Decimal(signed) == 0:
+        return "+0.000"
+    return ("-" if signed[0] == "+" else "+") + signed[1:]
+
+
+async def test_compare_closed_and_open_batches(client_fixture, clean) -> None:
+    # A 闭合（差额 +5，允许差 5）；B 不闭合（差额 +10，允许差 6）
+    a = client_fixture.post(
+        "/api/batches", json=payload("CMP-A", issued=["1000.000"], product=["1005.000"])
+    ).json()
+    b = client_fixture.post(
+        "/api/batches", json=payload("CMP-B", issued=["3000.000"], product=["3010.000"])
+    ).json()
+    assert a["closed"] is True and b["closed"] is False
+
+    resp = client_fixture.get(f"/api/batches/{b['id']}/compare", params={"base_id": a["id"]})
+    assert resp.status_code == 200, resp.text
+    c = resp.json()
+
+    # 双方身份与裁决快照
+    assert c["current"] == {
+        "id": b["id"], "batch_no": "CMP-B", "closed": False, "verdict": "不闭合"
+    }
+    assert c["base"] == {
+        "id": a["id"], "batch_no": "CMP-A", "closed": True, "verdict": "闭合"
+    }
+    assert c["verdict_changed"] is True
+
+    # 各指标：双方快照值 + 带符号变化量（当前 − 基准），固定三位小数
+    assert c["issued_total"] == {
+        "current": "3000.000", "base": "1000.000", "delta": "+2000.000"
+    }
+    assert c["returned_total"] == {
+        "current": "0.000", "base": "0.000", "delta": "+0.000"
+    }
+    assert c["net_input"] == {
+        "current": "3000.000", "base": "1000.000", "delta": "+2000.000"
+    }
+    assert c["product_total"] == {
+        "current": "3010.000", "base": "1005.000", "delta": "+2005.000"
+    }
+    assert c["scrap_total"] == {"current": "0.000", "base": "0.000", "delta": "+0.000"}
+    assert c["output_total"] == {
+        "current": "3010.000", "base": "1005.000", "delta": "+2005.000"
+    }
+    assert c["difference"] == {
+        "current": "+10.000", "base": "+5.000", "delta": "+5.000"
+    }
+    assert c["tolerance"] == {"current": "6.000", "base": "5.000", "delta": "+1.000"}
+
+
+async def test_compare_negative_deltas(client_fixture, clean) -> None:
+    # C 不闭合且差额为负（产出少于净投入）：与闭合批次互比出现负差值
+    a = client_fixture.post(
+        "/api/batches", json=payload("CMP-2A", issued=["1000.000"], product=["1005.000"])
+    ).json()
+    c = client_fixture.post(
+        "/api/batches", json=payload("CMP-2C", issued=["1000.000"], product=["990.000"])
+    ).json()
+    assert a["closed"] is True and c["closed"] is False
+
+    resp = client_fixture.get(f"/api/batches/{c['id']}/compare", params={"base_id": a["id"]})
+    assert resp.status_code == 200, resp.text
+    cmp = resp.json()
+    assert cmp["difference"] == {
+        "current": "-10.000", "base": "+5.000", "delta": "-15.000"
+    }
+    assert cmp["output_total"]["delta"] == "-15.000"
+    assert cmp["net_input"]["delta"] == "+0.000"
+    assert cmp["tolerance"]["delta"] == "+0.000"
+    assert cmp["verdict_changed"] is True
+
+    # 两个同样不闭合的批次互比：裁决无变化
+    d = client_fixture.post(
+        "/api/batches", json=payload("CMP-2D", issued=["1000.000"], product=["1020.000"])
+    ).json()
+    resp = client_fixture.get(f"/api/batches/{d['id']}/compare", params={"base_id": c["id"]})
+    assert resp.status_code == 200
+    cmp2 = resp.json()
+    assert cmp2["verdict_changed"] is False
+    assert cmp2["difference"]["delta"] == "+30.000"  # +20 − (−10)
+
+
+async def test_compare_reverse_swaps_every_sign(client_fixture, clean) -> None:
+    # 反向互换基准：双方快照互换，所有差值符号严格相反
+    a = client_fixture.post(
+        "/api/batches",
+        json=payload("CMP-3A", issued=["1000.000", "500.000"],
+                     returned=["100.000"], product=["1395.000"], scrap=["10.000"]),
+    ).json()
+    b = client_fixture.post(
+        "/api/batches",
+        json=payload("CMP-3B", issued=["900.000"], returned=["50.000"],
+                     product=["860.000"], scrap=["5.000"]),
+    ).json()
+
+    fwd = client_fixture.get(
+        f"/api/batches/{b['id']}/compare", params={"base_id": a["id"]}
+    ).json()
+    rev = client_fixture.get(
+        f"/api/batches/{a['id']}/compare", params={"base_id": b["id"]}
+    ).json()
+
+    assert fwd["current"] == rev["base"]
+    assert fwd["base"] == rev["current"]
+    assert fwd["verdict_changed"] == rev["verdict_changed"]
+    for key in METRIC_KEYS:
+        assert rev[key]["current"] == fwd[key]["base"], key
+        assert rev[key]["base"] == fwd[key]["current"], key
+        assert rev[key]["delta"] == _negate(fwd[key]["delta"]), key
+
+
+async def test_compare_missing_batch_reports_clear_id(client_fixture, clean) -> None:
+    saved = client_fixture.post(
+        "/api/batches", json=payload("CMP-4A", issued=["100.000"], product=["100.000"])
+    ).json()
+
+    # 当前批次不存在：404 且指明角色与批次标识
+    resp = client_fixture.get("/api/batches/999/compare", params={"base_id": saved["id"]})
+    assert resp.status_code == 404
+    assert "当前批次" in resp.json()["detail"]
+    assert "999" in resp.json()["detail"]
+
+    # 基准批次不存在：同样明确
+    resp = client_fixture.get(
+        f"/api/batches/{saved['id']}/compare", params={"base_id": 999}
+    )
+    assert resp.status_code == 404
+    assert "基准批次" in resp.json()["detail"]
+    assert "999" in resp.json()["detail"]
+
+
+async def test_compare_with_self_rejected(client_fixture, clean) -> None:
+    saved = client_fixture.post(
+        "/api/batches", json=payload("CMP-5A", issued=["100.000"], product=["100.000"])
+    ).json()
+    resp = client_fixture.get(
+        f"/api/batches/{saved['id']}/compare", params={"base_id": saved["id"]}
+    )
+    assert resp.status_code == 400
+    assert "自身" in resp.json()["detail"]
+
+
+async def test_compare_is_read_only(client_fixture, clean) -> None:
+    from app.db import engine
+
+    a = client_fixture.post(
+        "/api/batches", json=payload("CMP-6A", issued=["1000.000"], product=["1005.000"])
+    ).json()
+    b = client_fixture.post(
+        "/api/batches", json=payload("CMP-6B", issued=["3000.000"], product=["3010.000"])
+    ).json()
+
+    list_before = client_fixture.get("/api/batches").json()
+    detail_a_before = client_fixture.get(f"/api/batches/{a['id']}").json()
+    detail_b_before = client_fixture.get(f"/api/batches/{b['id']}").json()
+
+    # 两个方向各对比一次
+    assert client_fixture.get(
+        f"/api/batches/{b['id']}/compare", params={"base_id": a["id"]}
+    ).status_code == 200
+    assert client_fixture.get(
+        f"/api/batches/{a['id']}/compare", params={"base_id": b["id"]}
+    ).status_code == 200
+
+    # 批次与称重行均未变化：列表、详情与库内行数完全一致
+    assert client_fixture.get("/api/batches").json() == list_before
+    assert client_fixture.get(f"/api/batches/{a['id']}").json() == detail_a_before
+    assert client_fixture.get(f"/api/batches/{b['id']}").json() == detail_b_before
+    async with AsyncSession(engine) as s:
+        n_batches = (await s.execute(text("SELECT count(*) FROM batches"))).scalar_one()
+        n_entries = (
+            await s.execute(text("SELECT count(*) FROM weight_entries"))
+        ).scalar_one()
+    assert n_batches == 2
+    assert n_entries == 4

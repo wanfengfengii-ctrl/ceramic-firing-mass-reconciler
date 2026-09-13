@@ -168,7 +168,7 @@ export default function App() {
         {saving ? "提交中…" : "提交核算并保存"}
       </button>
 
-      {detail && <DetailView detail={detail} />}
+      {detail && <DetailView detail={detail} candidates={list} />}
 
       <section className="panel history" aria-label="已保存批次">
         <h2>已保存批次</h2>

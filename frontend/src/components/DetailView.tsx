@@ -1,12 +1,15 @@
 import { KIND_LABEL, KINDS, type Kind } from "../domain";
-import type { BatchDetail } from "../api";
+import type { BatchDetail, BatchSummary } from "../api";
+import { ComparePanel } from "./ComparePanel";
 
 export interface DetailViewProps {
   detail: BatchDetail;
+  /** 已保存批次列表，作为对比基准候选 */
+  candidates: BatchSummary[];
 }
 
-/** 已保存批次的可复算详情：原始行、两侧合计、带符号差额、允许差、裁决。 */
-export function DetailView({ detail }: DetailViewProps) {
+/** 已保存批次的可复算详情：原始行、两侧合计、带符号差额、允许差、裁决与批次对比。 */
+export function DetailView({ detail, candidates }: DetailViewProps) {
   return (
     <section className="panel detail" aria-label="批次核算详情" data-testid="batch-detail">
       <h2>
@@ -95,6 +98,8 @@ export function DetailView({ detail }: DetailViewProps) {
           </div>
         ))}
       </div>
+
+      <ComparePanel current={detail} candidates={candidates} />
     </section>
   );
 }

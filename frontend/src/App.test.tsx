@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import type { BatchDetail, BatchSummary } from "./api";
+import type { BatchCompare, BatchDetail, BatchSummary } from "./api";
 
 const detailClosed: BatchDetail = {
   id: 7,
@@ -356,5 +356,173 @@ describe("App 核算站", () => {
     await waitFor(() =>
       expect(within(detail).getByTestId("detail-difference")).toHaveTextContent("+5.000"),
     );
+  });
+
+  // ---------------------------------------------------------------------
+  // 批次对比：详情区选择基准批次，并排核对双方快照与带符号差异
+  // ---------------------------------------------------------------------
+
+  const detailOpen: BatchDetail = {
+    ...detailClosed,
+    id: 9,
+    batch_no: "K-9",
+    closed: false,
+    verdict: "不闭合",
+    issued_total: "3000.000",
+    product_total: "3010.000",
+    net_input: "3000.000",
+    output_total: "3010.000",
+    difference: "+10.000",
+    tolerance: "6",
+    entries: {
+      issued: [{ seq: 1, weight: "3000.000", mode: "single" }],
+      returned: [],
+      product: [{ seq: 1, weight: "3010.000", mode: "single" }],
+      scrap: [],
+    },
+  };
+
+  const summaryOpen: BatchSummary = {
+    id: 9,
+    batch_no: "K-9",
+    closed: false,
+    verdict: "不闭合",
+    net_input: "3000.000",
+    difference: "+10.000",
+    tolerance: "6",
+    created_at: "2026-09-12T11:00:00+00:00",
+  };
+
+  const compareResult: BatchCompare = {
+    current: { id: 9, batch_no: "K-9", closed: false, verdict: "不闭合" },
+    base: { id: 7, batch_no: "K-7", closed: true, verdict: "闭合" },
+    issued_total: { current: "3000.000", base: "1000.000", delta: "+2000.000" },
+    returned_total: { current: "0.000", base: "0.000", delta: "+0.000" },
+    net_input: { current: "3000.000", base: "1000.000", delta: "+2000.000" },
+    product_total: { current: "3010.000", base: "1005.000", delta: "+2005.000" },
+    scrap_total: { current: "0.000", base: "0.000", delta: "+0.000" },
+    output_total: { current: "3010.000", base: "1005.000", delta: "+2005.000" },
+    difference: { current: "+10.000", base: "+5.000", delta: "+5.000" },
+    tolerance: { current: "6.000", base: "5.000", delta: "+1.000" },
+    verdict_changed: true,
+  };
+
+  /** 打开 K-9 的详情并返回对比区控件。 */
+  async function openDetailAndCompare(user: ReturnType<typeof userEvent.setup>) {
+    render(<App />);
+    const row = await screen.findByTestId("row-9");
+    await user.click(within(row).getByRole("button", { name: "查看可复算详情" }));
+    await screen.findByTestId("batch-detail");
+    return {
+      select: screen.getByTestId("compare-base-select") as HTMLSelectElement,
+      runButton: screen.getByTestId("compare-run"),
+    };
+  }
+
+  it("详情区选择基准批次对比：展示基准摘要、带符号差异与裁决变化", async () => {
+    const user = userEvent.setup();
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string) => {
+        if (url === "/api/batches") return jsonResponse([summaryOpen, summary]);
+        if (url === "/api/batches/9") return jsonResponse(detailOpen);
+        if (url === "/api/batches/9/compare?base_id=7") return jsonResponse(compareResult);
+        return jsonResponse({ detail: `未预期 ${url}` }, 500);
+      },
+    );
+
+    const { select, runButton } = await openDetailAndCompare(user);
+    await user.selectOptions(select, "7");
+    await user.click(runButton);
+
+    const result = await screen.findByTestId("compare-result");
+    // 基准摘要：双方批次号与裁决
+    expect(within(result).getByTestId("compare-base-summary")).toHaveTextContent(
+      "K-9（不闭合）对比基准批次 K-7（闭合）",
+    );
+    // 裁决变化
+    expect(within(result).getByTestId("compare-verdict-change")).toHaveTextContent(
+      "闭合 → 不闭合",
+    );
+    // 带符号差异：正增、零、负向相反
+    expect(within(result).getByTestId("compare-delta-net_input")).toHaveTextContent(
+      "+2000.000 g",
+    );
+    expect(within(result).getByTestId("compare-delta-difference")).toHaveTextContent(
+      "+5.000 g",
+    );
+    expect(within(result).getByTestId("compare-delta-tolerance")).toHaveTextContent(
+      "+1.000 g",
+    );
+    expect(within(result).getByTestId("compare-delta-scrap_total")).toHaveTextContent(
+      "+0.000 g",
+    );
+    // 双方快照值同列呈现
+    expect(within(result).getByTestId("compare-row-net_input")).toHaveTextContent(
+      "3000.000",
+    );
+    expect(within(result).getByTestId("compare-row-net_input")).toHaveTextContent(
+      "1000.000",
+    );
+  });
+
+  it("选择自身作为基准时页面阻止请求，不发对比请求", async () => {
+    const user = userEvent.setup();
+    const compareSpy = vi.fn(async () => jsonResponse(compareResult));
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string) => {
+        if (url === "/api/batches") return jsonResponse([summaryOpen, summary]);
+        if (url === "/api/batches/9") return jsonResponse(detailOpen);
+        if (url.includes("/compare")) return compareSpy();
+        return jsonResponse({ detail: `未预期 ${url}` }, 500);
+      },
+    );
+
+    const { select, runButton } = await openDetailAndCompare(user);
+    // 基准下拉里包含当前批次自身，选择后点击对比
+    await user.selectOptions(select, "9");
+    await user.click(runButton);
+
+    const error = await screen.findByTestId("compare-error");
+    expect(error).toHaveTextContent("自身");
+    expect(compareSpy).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("compare-result")).not.toBeInTheDocument();
+    // 详情保持打开
+    expect(screen.getByTestId("batch-detail")).toBeInTheDocument();
+  });
+
+  it("对比读取失败后保留当前详情与基准选择，可直接重试", async () => {
+    const user = userEvent.setup();
+    let compareCalls = 0;
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string) => {
+        if (url === "/api/batches") return jsonResponse([summaryOpen, summary]);
+        if (url === "/api/batches/9") return jsonResponse(detailOpen);
+        if (url === "/api/batches/9/compare?base_id=7") {
+          compareCalls += 1;
+          // 第一次失败（如基准已被清理），第二次成功
+          return compareCalls === 1
+            ? jsonResponse({ detail: "基准批次 7 不存在" }, 404)
+            : jsonResponse(compareResult);
+        }
+        return jsonResponse({ detail: `未预期 ${url}` }, 500);
+      },
+    );
+
+    const { select, runButton } = await openDetailAndCompare(user);
+    await user.selectOptions(select, "7");
+    await user.click(runButton);
+
+    // 失败：错误提示出现，详情与基准选择都保留
+    const error = await screen.findByTestId("compare-error");
+    expect(error).toHaveTextContent("基准批次 7 不存在");
+    expect(screen.getByTestId("batch-detail")).toBeInTheDocument();
+    expect(select.value).toBe("7");
+    expect(screen.queryByTestId("compare-result")).not.toBeInTheDocument();
+
+    // 不重新选择，直接再次发起对比即成功
+    await user.click(runButton);
+    expect(await screen.findByTestId("compare-result")).toBeInTheDocument();
+    expect(screen.queryByTestId("compare-error")).not.toBeInTheDocument();
+    expect(compareCalls).toBe(2);
   });
 });

@@ -319,3 +319,78 @@ header h1 {
   text-align: left;
   font-variant-numeric: tabular-nums;
 }
+
+.compare {
+  margin-top: 16px;
+  border-top: 2px solid #e4e7eb;
+  padding-top: 12px;
+}
+
+.compare h3 {
+  margin: 0 0 8px;
+}
+
+.compare-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.compare-controls select {
+  padding: 6px 8px;
+  border: 1px solid #cbd2d9;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  max-width: 100%;
+}
+
+.compare-controls button {
+  padding: 6px 16px;
+  border: none;
+  border-radius: 6px;
+  background: #1a56db;
+  color: #fff;
+  cursor: pointer;
+}
+
+.compare-controls button:disabled {
+  opacity: 0.6;
+}
+
+.compare-summary,
+.compare-verdict {
+  margin: 8px 0;
+}
+
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+
+.compare-table th,
+.compare-table td {
+  padding: 6px;
+  border-bottom: 1px solid #eef1f4;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+.compare-table td {
+  text-align: right;
+}
+
+.delta-pos {
+  color: #1a56db;
+  font-weight: 600;
+}
+
+.delta-neg {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.delta-zero {
+  color: #7b8794;
+}

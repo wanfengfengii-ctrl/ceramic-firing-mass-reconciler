@@ -10,8 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .calc import WeightValidationError
 from .db import get_session, init_db
-from .schemas import BatchDetail, BatchIn, BatchSummary
-from .service import DuplicateBatchError, create_batch, get_batch, list_batches
+from .schemas import BatchCompare, BatchDetail, BatchIn, BatchSummary
+from .service import (
+    BatchNotFoundError,
+    DuplicateBatchError,
+    SelfCompareError,
+    compare_batches,
+    create_batch,
+    get_batch,
+    list_batches,
+)
 
 app = FastAPI(title="试烧窑批次核算站", version="1.0.0")
 
@@ -40,6 +48,17 @@ async def _duplicate_handler(request: Request, exc: DuplicateBatchError) -> JSON
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
+@app.exception_handler(BatchNotFoundError)
+async def _batch_not_found_handler(request: Request, exc: BatchNotFoundError) -> JSONResponse:
+    # 明确给出缺失的是当前批次还是基准批次以及其标识
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(SelfCompareError)
+async def _self_compare_handler(request: Request, exc: SelfCompareError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -63,3 +82,10 @@ async def get_one(batch_id: int, session: AsyncSession = Depends(get_session)) -
     if detail is None:
         raise HTTPException(status_code=404, detail="批次不存在")
     return detail
+
+
+@app.get("/api/batches/{batch_id}/compare", response_model=BatchCompare)
+async def compare(
+    batch_id: int, base_id: int, session: AsyncSession = Depends(get_session)
+) -> BatchCompare:
+    return await compare_batches(session, batch_id, base_id)

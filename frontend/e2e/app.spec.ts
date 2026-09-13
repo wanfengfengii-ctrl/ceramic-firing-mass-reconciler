@@ -360,3 +360,69 @@ test("同一非法成组行不修改再次提交：每次都重新聚焦对应�
   await expect(count).toBeFocused();
 });
 
+test("批次对比：闭合与不闭合互比、反向符号相反、自比阻止、刷新后重新对比", async ({ page }) => {
+  // 经真实 API 准备两个批次：A 闭合（差额 +5，允许差 5），B 不闭合（差额 +10，允许差 6）
+  const noA = nextBatchNo();
+  const noB = nextBatchNo();
+  const respA = await page.request.post("/api/batches", {
+    data: { batch_no: noA, entries: { issued: ["1000.000"], product: ["1005.000"] } },
+  });
+  expect(respA.status()).toBe(201);
+  const respB = await page.request.post("/api/batches", {
+    data: { batch_no: noB, entries: { issued: ["3000.000"], product: ["3010.000"] } },
+  });
+  expect(respB.status()).toBe(201);
+
+  // 打开 B 的详情，选择 A 为基准并发起对比
+  await page.goto("/");
+  const rowB = page.getByRole("row", { name: new RegExp(noB) });
+  await rowB.getByRole("button", { name: "查看可复算详情" }).click();
+  await expect(page.getByTestId("detail-verdict")).toHaveText("不闭合");
+
+  await page.getByTestId("compare-base-select").selectOption({ label: `${noA}（闭合）` });
+  await page.getByTestId("compare-run").click();
+
+  // 基准摘要、裁决变化与带符号差异（当前 B − 基准 A）
+  await expect(page.getByTestId("compare-base-summary")).toContainText(noB);
+  await expect(page.getByTestId("compare-base-summary")).toContainText(noA);
+  await expect(page.getByTestId("compare-verdict-change")).toContainText("闭合 → 不闭合");
+  await expect(page.getByTestId("compare-delta-net_input")).toHaveText("+2000.000 g");
+  await expect(page.getByTestId("compare-delta-difference")).toHaveText("+5.000 g");
+  await expect(page.getByTestId("compare-delta-tolerance")).toHaveText("+1.000 g");
+  await expect(page.getByTestId("compare-delta-scrap_total")).toHaveText("+0.000 g");
+
+  // 反向互换基准：打开 A 的详情对比 B，差值符号严格相反
+  const rowA = page.getByRole("row", { name: new RegExp(noA) });
+  await rowA.getByRole("button", { name: "查看可复算详情" }).click();
+  await expect(page.getByTestId("detail-verdict")).toHaveText("闭合");
+  await page.getByTestId("compare-base-select").selectOption({ label: `${noB}（不闭合）` });
+  await page.getByTestId("compare-run").click();
+  await expect(page.getByTestId("compare-delta-net_input")).toHaveText("-2000.000 g");
+  await expect(page.getByTestId("compare-delta-difference")).toHaveText("-5.000 g");
+  await expect(page.getByTestId("compare-delta-tolerance")).toHaveText("-1.000 g");
+  await expect(page.getByTestId("compare-verdict-change")).toContainText("不闭合 → 闭合");
+
+  // 选择自身作为基准：页面阻止，不发出对比请求
+  const compareRequests: string[] = [];
+  page.on("request", (req) => {
+    if (req.url().includes("/compare")) compareRequests.push(req.url());
+  });
+  await page.getByTestId("compare-base-select").selectOption({ label: `${noA}（闭合）` });
+  await page.getByTestId("compare-run").click();
+  await expect(page.getByTestId("compare-error")).toContainText("自身");
+  expect(compareRequests).toEqual([]);
+  // 详情保持打开
+  await expect(page.getByTestId("batch-detail")).toBeVisible();
+
+  // 刷新后重新打开详情并重新对比：结果与刷新前一致
+  await page.reload();
+  const rowAAfter = page.getByRole("row", { name: new RegExp(noA) });
+  await rowAAfter.getByRole("button", { name: "查看可复算详情" }).click();
+  await expect(page.getByTestId("detail-verdict")).toHaveText("闭合");
+  await page.getByTestId("compare-base-select").selectOption({ label: `${noB}（不闭合）` });
+  await page.getByTestId("compare-run").click();
+  await expect(page.getByTestId("compare-delta-net_input")).toHaveText("-2000.000 g");
+  await expect(page.getByTestId("compare-delta-difference")).toHaveText("-5.000 g");
+  await expect(page.getByTestId("compare-verdict-change")).toContainText("不闭合 → 闭合");
+});
+

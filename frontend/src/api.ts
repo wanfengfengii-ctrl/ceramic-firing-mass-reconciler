@@ -48,6 +48,34 @@ export interface BatchSummary {
   created_at: string;
 }
 
+export interface CompareSide {
+  id: number;
+  batch_no: string;
+  closed: boolean;
+  verdict: string;
+}
+
+/** 单个指标：双方快照值与带符号变化量（当前 − 基准），三位小数十进制字符串。 */
+export interface MetricDelta {
+  current: string;
+  base: string;
+  delta: string;
+}
+
+export interface BatchCompare {
+  current: CompareSide;
+  base: CompareSide;
+  issued_total: MetricDelta;
+  returned_total: MetricDelta;
+  net_input: MetricDelta;
+  product_total: MetricDelta;
+  scrap_total: MetricDelta;
+  output_total: MetricDelta;
+  difference: MetricDelta;
+  tolerance: MetricDelta;
+  verdict_changed: boolean;
+}
+
 export interface BatchIn {
   batch_no: string;
   entries: Record<Kind, EntryIn[]>;
@@ -89,5 +117,8 @@ export const api = {
   },
   create(payload: BatchIn): Promise<BatchDetail> {
     return request("/api/batches", { method: "POST", body: JSON.stringify(payload) });
+  },
+  compare(id: number, baseId: number): Promise<BatchCompare> {
+    return request(`/api/batches/${id}/compare?base_id=${baseId}`);
   },
 };

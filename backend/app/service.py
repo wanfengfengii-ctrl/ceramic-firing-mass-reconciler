@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -16,7 +17,16 @@ from .calc import (
     reckon_prepared,
 )
 from .models import Batch, WeightEntry
-from .schemas import BatchDetail, BatchSummary, EntryOut, GroupEntryIn, q3
+from .schemas import (
+    BatchCompare,
+    BatchDetail,
+    BatchSummary,
+    CompareSide,
+    EntryOut,
+    GroupEntryIn,
+    MetricDelta,
+    q3,
+)
 
 
 async def create_batch(session: AsyncSession, batch_no: str, raw_entries: dict) -> BatchDetail:
@@ -107,6 +117,77 @@ async def get_batch(session: AsyncSession, batch_id: int) -> BatchDetail | None:
     if batch is None:
         return None
     return detail_from_model(batch)
+
+
+class BatchNotFoundError(Exception):
+    """对比涉及的批次不存在；role 指明是“当前批次”还是“基准批次”。"""
+
+    def __init__(self, role: str, batch_id: int) -> None:
+        self.role = role
+        self.batch_id = batch_id
+        super().__init__(f"{role} {batch_id} 不存在")
+
+
+class SelfCompareError(ValueError):
+    """基准批次与当前批次相同：页面本应阻止，服务端同样明确拒绝。"""
+
+    def __init__(self, batch_id: int) -> None:
+        self.batch_id = batch_id
+        super().__init__(f"批次 {batch_id} 不能与自身对比，请选择另一基准批次")
+
+
+async def compare_batches(
+    session: AsyncSession, batch_id: int, base_id: int
+) -> BatchCompare:
+    """并排核对两个已保存批次。
+
+    全部指标直接取库内核算快照（合计/差额/允许差/裁决）相减，
+    纯只读：不重算称重行，更不修改批次或称重行。
+    """
+
+    if base_id == batch_id:
+        raise SelfCompareError(batch_id)
+    current = await session.scalar(select(Batch).where(Batch.id == batch_id))
+    if current is None:
+        raise BatchNotFoundError("当前批次", batch_id)
+    base = await session.scalar(select(Batch).where(Batch.id == base_id))
+    if base is None:
+        raise BatchNotFoundError("基准批次", base_id)
+    return compare_from_models(current, base)
+
+
+def _side(batch: Batch) -> CompareSide:
+    return CompareSide(
+        id=batch.id,
+        batch_no=batch.batch_no,
+        closed=batch.closed,
+        verdict="闭合" if batch.closed else "不闭合",
+    )
+
+
+def _delta(current: Decimal, base: Decimal, *, signed: bool = False) -> MetricDelta:
+    # signed：差额本身在详情中带符号展示，对比里双方快照值保持同一形式
+    return MetricDelta(
+        current=q3(current, signed=signed),
+        base=q3(base, signed=signed),
+        delta=q3(current - base, signed=True),
+    )
+
+
+def compare_from_models(current: Batch, base: Batch) -> BatchCompare:
+    return BatchCompare(
+        current=_side(current),
+        base=_side(base),
+        issued_total=_delta(current.issued_total, base.issued_total),
+        returned_total=_delta(current.returned_total, base.returned_total),
+        net_input=_delta(current.net_input, base.net_input),
+        product_total=_delta(current.product_total, base.product_total),
+        scrap_total=_delta(current.scrap_total, base.scrap_total),
+        output_total=_delta(current.output_total, base.output_total),
+        difference=_delta(current.difference, base.difference, signed=True),
+        tolerance=_delta(current.tolerance, base.tolerance),
+        verdict_changed=current.closed != base.closed,
+    )
 
 
 def _entries_by_kind(batch: Batch) -> dict[str, list[EntryOut]]:

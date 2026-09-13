@@ -94,6 +94,39 @@ class BatchSummary(BaseModel):
     created_at: str
 
 
+class CompareSide(BaseModel):
+    """对比中一方的身份与裁决快照。"""
+
+    id: int
+    batch_no: str
+    closed: bool
+    verdict: str
+
+
+class MetricDelta(BaseModel):
+    """单个指标：双方快照值与带符号变化量（当前 − 基准），均保留三位小数。"""
+
+    current: str
+    base: str
+    delta: str  # 带符号：正为增、负为减
+
+
+class BatchCompare(BaseModel):
+    """两个已保存批次的并排核对结果（只读，由库内核算快照直接相减）。"""
+
+    current: CompareSide
+    base: CompareSide
+    issued_total: MetricDelta
+    returned_total: MetricDelta
+    net_input: MetricDelta
+    product_total: MetricDelta
+    scrap_total: MetricDelta
+    output_total: MetricDelta
+    difference: MetricDelta
+    tolerance: MetricDelta
+    verdict_changed: bool  # 双方裁决是否不同（闭合 ↔ 不闭合）
+
+
 def q3(value: Decimal, *, signed: bool = False) -> str:
     text = f"{value:.3f}"
     if signed and value >= 0:
