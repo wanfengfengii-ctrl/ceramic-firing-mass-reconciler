@@ -19,10 +19,18 @@ export interface EntryFormProps {
   onChange: (next: FormRow[]) => void;
   /** 需要定位的出错行下标（0 起）；变化时滚动并聚焦对应输入 */
   errorSeq?: number | null;
+  /** 提交序号：同一行未修改再次提交时也随之变化，保证每次都重新定位 */
+  errorAttempt?: number;
 }
 
 /** 单个分区：每行可在单笔/成组两种录入方式间切换，可增删行。 */
-export function EntryForm({ kind, rows, onChange, errorSeq = null }: EntryFormProps) {
+export function EntryForm({
+  kind,
+  rows,
+  onChange,
+  errorSeq = null,
+  errorAttempt = 0,
+}: EntryFormProps) {
   const label = KIND_LABEL[kind];
 
   const patch = (idx: number, patch: Partial<FormRow>) => {
@@ -62,6 +70,7 @@ export function EntryForm({ kind, rows, onChange, errorSeq = null }: EntryFormPr
             seq={idx}
             row={row}
             hasError={errorSeq === idx}
+            errorAttempt={errorAttempt}
             onWeight={(v) => update(idx, v)}
             onUnit={(v) => patch(idx, { unitWeight: v })}
             onCount={(v) => patch(idx, { count: v })}
@@ -87,6 +96,8 @@ interface RowEditorProps {
   seq: number;
   row: FormRow;
   hasError: boolean;
+  /** 提交序号：与 hasError 一起驱动定位效果，重复提交同一错误也重新聚焦 */
+  errorAttempt: number;
   onWeight: (v: string) => void;
   onUnit: (v: string) => void;
   onCount: (v: string) => void;
@@ -100,6 +111,7 @@ function RowEditor({
   seq,
   row,
   hasError,
+  errorAttempt,
   onWeight,
   onUnit,
   onCount,
@@ -110,7 +122,8 @@ function RowEditor({
   const unitRef = useRef<HTMLInputElement>(null);
   const countRef = useRef<HTMLInputElement>(null);
 
-  // 页面校验失败时定位到本行：滚动到可见并聚焦该方式下出错的输入
+  // 页面校验失败时定位到本行：滚动到可见并聚焦该方式下出错的输入；
+  // errorAttempt 随每次提交变化，同一行重复出错也会重新定位
   useEffect(() => {
     if (!hasError) return;
     const target =
@@ -121,7 +134,7 @@ function RowEditor({
           : unitRef.current;
     target?.scrollIntoView?.({ block: "center", behavior: "smooth" });
     target?.focus();
-  }, [hasError, row.mode, row.unitWeight]);
+  }, [hasError, errorAttempt, row.mode, row.unitWeight]);
 
   // 成组行即时显示十进制乘积（已填写且合法时）
   const groupEval = row.mode === "group" && !isBlankRow(row) ? evaluateRow(row) : null;

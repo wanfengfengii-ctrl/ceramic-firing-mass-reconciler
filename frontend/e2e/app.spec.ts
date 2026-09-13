@@ -280,3 +280,83 @@ test("成组单份指数极大时页面不卡死：立即在该行提示重量�
   await expect(page.getByTestId("subtotal-product")).toHaveText("小计：100.000 g");
   await expect(page.getByTestId("preview-verdict")).toHaveText("预览裁决：不闭合");
 });
+
+test("产出合计超限：领料取上限、成品废料各六百亿克，整批校验拒绝而非保存阶段异常", async ({ page }) => {
+  const no = nextBatchNo();
+  await page.getByTestId("batch-no").fill(no);
+  await fillRow(page, "领料", 1, "99999999999.999");
+  await fillRow(page, "成品", 1, "60000000000");
+  await fillRow(page, "废料", 1, "60000000000");
+
+  // 预览即提示产出合计超限、无法核算
+  await expect(page.locator(".panel-result .invalid")).toContainText("产出合计");
+
+  // 页面整批校验拦截：不发出 POST
+  const postRequests: string[] = [];
+  page.on("request", (req) => {
+    if (req.method() === "POST" && req.url().includes("/api/batches")) postRequests.push(req.url());
+  });
+  await page.getByTestId("submit").click();
+  const error = page.getByTestId("form-error");
+  await expect(error).toBeVisible();
+  await expect(error).toContainText("产出合计 120000000000.000 g 超出存储范围");
+  await expect(page.getByTestId("batch-detail")).toHaveCount(0);
+  expect(postRequests).toEqual([]);
+
+  // 直接打后端：同样在整批校验时 400 拒绝（不是保存阶段的 500），不留记录
+  const resp = await page.request.post("/api/batches", {
+    data: {
+      batch_no: no,
+      entries: {
+        issued: ["99999999999.999"],
+        product: ["60000000000.000"],
+        scrap: ["60000000000.000"],
+      },
+    },
+  });
+  expect(resp.status()).toBe(400);
+  expect((await resp.json()).detail).toContain("产出合计");
+
+  const list = await page.request.get("/api/batches");
+  const batches = (await list.json()) as Array<{ batch_no: string }>;
+  expect(batches.find((b) => b.batch_no === no)).toBeUndefined();
+});
+
+test("领料首行空白、第二行份数越界：提示行号与界面行号一致并定位第二行", async ({ page }) => {
+  const no = nextBatchNo();
+  await page.getByTestId("batch-no").fill(no);
+  // 第一行保留空白，第二行录入越界成组份数
+  await page.getByRole("button", { name: "+ 添加一笔领料" }).click();
+  await switchRowToGroup(page, "领料", 2);
+  await fillGroupRow(page, "领料", 2, "12.500", "1000");
+
+  await page.getByTestId("submit").click();
+  const error = page.getByTestId("form-error");
+  // 提示“第 2 笔”与界面行标签一致，并聚焦第二行的份数输入
+  await expect(error).toHaveText("领料 第 2 笔：份数必须在 2 与 999 之间");
+  await expect(page.getByLabel("领料第2笔份数")).toBeFocused();
+});
+
+test("同一非法成组行不修改再次提交：每次都重新聚焦对应输入", async ({ page }) => {
+  const no = nextBatchNo();
+  await page.getByTestId("batch-no").fill(no);
+  await switchRowToGroup(page, "领料", 1);
+  await fillGroupRow(page, "领料", 1, "12.500", "1000");
+
+  const count = page.getByLabel("领料第1笔份数");
+  await page.getByTestId("submit").click();
+  await expect(page.getByTestId("form-error")).toHaveText(
+    "领料 第 1 笔：份数必须在 2 与 999 之间",
+  );
+  await expect(count).toBeFocused();
+
+  // 不修改任何输入，焦点移走后再次提交：仍重新聚焦份数输入
+  await page.getByTestId("batch-no").click();
+  await expect(count).not.toBeFocused();
+  await page.getByTestId("submit").click();
+  await expect(page.getByTestId("form-error")).toHaveText(
+    "领料 第 1 笔：份数必须在 2 与 999 之间",
+  );
+  await expect(count).toBeFocused();
+});
+

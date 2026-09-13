@@ -213,6 +213,100 @@ describe("App 核算站", () => {
     expect(postSpy).not.toHaveBeenCalled();
   });
 
+  it("领料首行空白、第二行份数越界：提示行号与界面行号一致并定位第二行", async () => {
+    const user = userEvent.setup();
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+        return jsonResponse({ detail: "不应被调用" }, 500);
+      },
+    );
+
+    render(<App />);
+    await user.type(screen.getByTestId("batch-no"), "ROW-NO");
+    const issuedPanel = screen.getByLabelText("领料分区");
+    // 第一行保留空白，添加第二行并切换为成组录入越界份数
+    await user.click(within(issuedPanel).getByRole("button", { name: "+ 添加一笔领料" }));
+    await user.click(within(issuedPanel).getAllByRole("radio", { name: "成组" })[1]);
+    await user.type(within(issuedPanel).getByLabelText("领料第2笔单份重量（克）"), "12.5");
+    const count = within(issuedPanel).getByLabelText("领料第2笔份数");
+    await user.type(count, "1000");
+
+    await user.click(screen.getByTestId("submit"));
+
+    const error = await screen.findByTestId("form-error");
+    // 提示行号与界面“第 2 笔”标签一致，且聚焦到第二行的份数输入
+    expect(error).toHaveTextContent("领料 第 2 笔：份数必须在 2 与 999 之间");
+    expect(count).toHaveFocus();
+  });
+
+  it("同一非法成组行不修改再次提交，每次都重新聚焦对应输入", async () => {
+    const user = userEvent.setup();
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+        return jsonResponse({ detail: "不应被调用" }, 500);
+      },
+    );
+
+    render(<App />);
+    await user.type(screen.getByTestId("batch-no"), "REFOCUS");
+    const issuedPanel = screen.getByLabelText("领料分区");
+    await user.click(within(issuedPanel).getAllByRole("radio", { name: "成组" })[0]);
+    await user.type(within(issuedPanel).getByLabelText("领料第1笔单份重量（克）"), "12.5");
+    const count = within(issuedPanel).getByLabelText("领料第1笔份数");
+    await user.type(count, "1000");
+
+    await user.click(screen.getByTestId("submit"));
+    await screen.findByTestId("form-error");
+    expect(count).toHaveFocus();
+
+    // 不修改任何输入，把焦点移到别处后再次提交：仍应重新聚焦份数输入
+    await user.click(screen.getByTestId("batch-no"));
+    expect(count).not.toHaveFocus();
+    await user.click(screen.getByTestId("submit"));
+    await screen.findByTestId("form-error");
+    expect(count).toHaveFocus();
+  });
+
+  it("领料取存储上限、成品废料各六百亿克：整批校验拒绝产出合计超限且不发请求", async () => {
+    const user = userEvent.setup();
+    const postSpy = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ detail: "不应被调用" }, 500),
+    );
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/batches" && method === "GET") return jsonResponse([]);
+        if (url === "/api/batches" && method === "POST") return postSpy(url, init);
+        return jsonResponse({ detail: "未预期" }, 500);
+      },
+    );
+
+    render(<App />);
+    await user.type(screen.getByTestId("batch-no"), "OVER-OUTPUT");
+    await user.type(screen.getByLabelText("领料第1笔重量（克）"), "99999999999.999");
+    await user.type(screen.getByLabelText("成品第1笔重量（克）"), "60000000000");
+    const scrapWeight = screen.getByLabelText("废料第1笔重量（克）");
+    await user.type(scrapWeight, "60000000000");
+
+    // 预览即提示产出合计超限，无法核算
+    expect(screen.getByText(/当前输入尚不能核算/)).toHaveTextContent("产出合计");
+
+    await user.click(screen.getByTestId("submit"));
+
+    const error = await screen.findByTestId("form-error");
+    expect(error).toHaveTextContent(
+      "产出合计 120000000000.000 g 超出存储范围（≤ 99999999999.999 g）",
+    );
+    // 定位到废料分区第一笔
+    expect(scrapWeight).toHaveFocus();
+    expect(screen.queryByTestId("batch-detail")).not.toBeInTheDocument();
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
   it("单笔非法重量在提交前被本地十进制校验拦下", async () => {
     const user = userEvent.setup();
     (fetch as ReturnType<typeof vi.fn>).mockImplementation(

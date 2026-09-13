@@ -262,16 +262,15 @@ export function validateRows(rowsByKind: Record<Kind, FormRow[]>):
   };
 
   for (const kind of KINDS) {
-    let filledNo = 0;
     for (let idx = 0; idx < rowsByKind[kind].length; idx++) {
       const row = rowsByKind[kind][idx];
       if (isBlankRow(row)) continue;
-      filledNo += 1;
       const ev = evaluateRow(row);
       if (!ev.ok) {
+        // 行号与界面“第 n 笔”标签一致：按含空白占位行的界面下标记数
         return {
           ok: false,
-          error: `${KIND_LABEL[kind]} 第 ${filledNo} 笔：${ev.error}`,
+          error: `${KIND_LABEL[kind]} 第 ${idx + 1} 笔：${ev.error}`,
           focus: { kind, seq: idx },
         };
       }
@@ -302,6 +301,21 @@ export function validateRows(rowsByKind: Record<Kind, FormRow[]>):
       ok: false,
       error: "同批退料总量不得大于领料总量",
       focus: { kind: "returned", seq: Math.max(firstReturned, 0) },
+    };
+  }
+
+  // 产出合计 = 成品 + 废料：两个分区各自合法不代表合计落进 Numeric(14,3)，
+  // 整批校验时明确拒绝，而不是留到保存阶段由数据库报数值溢出
+  const outputMg = totals.product + totals.scrap;
+  if (outputMg > MAX_STORED_MG) {
+    // 成品合计已合法，是加上废料后越界：定位到废料分区第一笔
+    const firstScrap = rowsByKind.scrap.findIndex((r) => !isBlankRow(r));
+    return {
+      ok: false,
+      error:
+        `产出合计 ${formatGrams(outputMg)} g 超出存储范围` +
+        `（≤ ${MAX_STORED_GRAMS} g）`,
+      focus: { kind: "scrap", seq: Math.max(firstScrap, 0) },
     };
   }
   return { ok: true, weights, totals };

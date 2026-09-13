@@ -238,6 +238,14 @@ def _compute(weights: dict[str, list[Decimal]]) -> Reckoning:
         ctx.prec = 28
         net_input = (issued_total - returned_total).quantize(GRAM)
         output_total = (product_total + scrap_total).quantize(GRAM)
+
+        # 产出合计同样要落进 Numeric(14,3) 列：成品、废料各自合法不代表合计合法，
+        # 在整批校验时明确拒绝，而不是留到保存阶段由数据库报数值溢出
+        if output_total > MAX_WEIGHT:
+            raise WeightValidationError(
+                f"产出合计 {output_total:.3f} g 超出存储范围（≤ {MAX_WEIGHT} g）"
+            )
+
         difference = (output_total - net_input).quantize(GRAM)
         percent = net_input * TOLERANCE_RATE
         percent_whole = percent.quantize(WHOLE_GRAM, rounding=ROUND_HALF_UP)

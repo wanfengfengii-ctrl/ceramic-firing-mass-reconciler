@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { EntryForm, ReckoningPanel } from "./components/EntryForm";
 import { DetailView } from "./components/DetailView";
 import {
@@ -26,8 +26,12 @@ export default function App() {
   const [rows, setRows] = useState<Rows>(emptyRows);
   const [batchNo, setBatchNo] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // 当前错误定位到的分区/行；驱动对应分区滚动并聚焦输入
-  const [errorFocus, setErrorFocus] = useState<FocusTarget | null>(null);
+  // 当前错误定位到的分区/行；attempt 随每次提交递增，
+  // 保证同一行未修改再次提交时也重新滚动并聚焦对应输入
+  const [errorFocus, setErrorFocus] = useState<(FocusTarget & { attempt: number }) | null>(
+    null,
+  );
+  const submitAttempt = useRef(0);
   const [saving, setSaving] = useState(false);
   const [detail, setDetail] = useState<BatchDetail | null>(null);
   const [list, setList] = useState<BatchSummary[]>([]);
@@ -66,7 +70,8 @@ export default function App() {
     const checked = validateRows(rows);
     if (!checked.ok) {
       setError(checked.error);
-      setErrorFocus(checked.focus);
+      submitAttempt.current += 1;
+      setErrorFocus({ ...checked.focus, attempt: submitAttempt.current });
       return;
     }
 
@@ -141,6 +146,7 @@ export default function App() {
             rows={rows[kind]}
             onChange={(next) => changeRows(kind, next)}
             errorSeq={errorFocus?.kind === kind ? errorFocus.seq : null}
+            errorAttempt={errorFocus?.kind === kind ? errorFocus.attempt : 0}
           />
         ))}
         <ReckoningPanel rowsByKind={rows} />

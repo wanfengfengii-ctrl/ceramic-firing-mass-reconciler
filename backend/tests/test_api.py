@@ -128,6 +128,32 @@ async def test_invalid_batch_leaves_no_rows(client_fixture, clean) -> None:
     assert n_entries == 0
 
 
+async def test_output_total_overflow_rejected_before_save(client_fixture, clean) -> None:
+    from app.db import engine
+
+    # 领料取存储上限，成品、废料各六百亿克：各自合法但产出合计越过 Numeric(14,3)。
+    # 必须在整批校验时 400 拒绝，而不是保存阶段 500；且不留任何记录。
+    resp = client_fixture.post(
+        "/api/batches",
+        json=payload(
+            "X-OUT",
+            issued=["99999999999.999"],
+            product=["60000000000.000"],
+            scrap=["60000000000.000"],
+        ),
+    )
+    assert resp.status_code == 400
+    assert "产出合计" in resp.json()["detail"]
+
+    async with AsyncSession(engine) as s:
+        n_batches = (await s.execute(text("SELECT count(*) FROM batches"))).scalar_one()
+        n_entries = (
+            await s.execute(text("SELECT count(*) FROM weight_entries"))
+        ).scalar_one()
+    assert n_batches == 0
+    assert n_entries == 0
+
+
 async def test_unknown_partition_rejected(client_fixture, clean) -> None:
     resp = client_fixture.post(
         "/api/batches",

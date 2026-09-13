@@ -233,6 +233,33 @@ def test_single_weight_over_storage_range_rejected() -> None:
         prepare_entry("100000000000.000", kind="issued", seq=1)
 
 
+def test_output_total_over_storage_range_rejected() -> None:
+    # 领料取存储上限；成品、废料各六百亿克，各自合法但产出合计越过 Numeric(14,3)。
+    # 整批校验必须明确拒绝，而不是留到保存阶段由数据库报数值溢出。
+    with pytest.raises(WeightValidationError, match="产出合计"):
+        reckon(
+            batch(
+                issued=["99999999999.999"],
+                product=["60000000000.000"],
+                scrap=["60000000000.000"],
+            )
+        )
+
+
+def test_output_total_at_storage_boundary_accepted() -> None:
+    # 产出合计恰好等于上限 99999999999.999：合法，差额为 0 即闭合
+    r = reckon(
+        batch(
+            issued=["99999999999.999"],
+            product=["50000000000.000"],
+            scrap=["49999999999.999"],
+        )
+    )
+    assert r.output_total == MAX_WEIGHT
+    assert r.difference == Decimal("0.000")
+    assert r.closed is True
+
+
 def test_unknown_partition_rejected_at_prepare() -> None:
     with pytest.raises(WeightValidationError, match="未知分区"):
         prepare_entries({"issued": ["1"], "bogus": ["2"]})

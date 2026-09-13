@@ -234,12 +234,47 @@ describe("validateRows", () => {
     }
   });
 
+  it("产出合计（成品+废料）超出存储范围时整批拒绝并定位废料分区", () => {
+    const rows = empty();
+    // 领料取存储上限；成品、废料各自合法，合计 1200 亿克越过 Numeric(14,3)
+    rows.issued = [single("99999999999.999")];
+    rows.product = [single("60000000000.000")];
+    rows.scrap = [single("60000000000.000")];
+    const r = validateRows(rows);
+    expect(r).toMatchObject({
+      ok: false,
+      error: "产出合计 120000000000.000 g 超出存储范围（≤ 99999999999.999 g）",
+    });
+    if (!r.ok) expect(r.focus).toEqual({ kind: "scrap", seq: 0 });
+  });
+
+  it("产出合计恰好等于存储上限时合法", () => {
+    const rows = empty();
+    rows.issued = [single("99999999999.999")];
+    rows.product = [single("50000000000.000")];
+    rows.scrap = [single("49999999999.999")]; // 合计恰为上限
+    const r = validateRows(rows);
+    expect(r.ok).toBe(true);
+  });
+
   it("定位到具体分区与行号（含空白占位行的界面下标）", () => {
     const rows = empty();
     rows.issued = [single("100"), newSingleRow(), single("0")];
     const r = validateRows(rows);
-    expect(r).toMatchObject({ ok: false, error: "领料 第 2 笔：必须大于零" });
+    // 提示行号与界面“第 n 笔”标签一致：空白占位行也占行号
+    expect(r).toMatchObject({ ok: false, error: "领料 第 3 笔：必须大于零" });
     if (!r.ok) expect(r.focus).toEqual({ kind: "issued", seq: 2 });
+  });
+
+  it("首行空白、第二行份数越界时提示第二笔并定位第二行", () => {
+    const rows = empty();
+    rows.issued = [newSingleRow(), group("12.500", "1000")];
+    const r = validateRows(rows);
+    expect(r).toMatchObject({
+      ok: false,
+      error: "领料 第 2 笔：份数必须在 2 与 999 之间",
+    });
+    if (!r.ok) expect(r.focus).toEqual({ kind: "issued", seq: 1 });
   });
 
   it("成组非法时错误指向分区和行，并区分单份/份数字段", () => {
